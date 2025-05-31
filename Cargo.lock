@@ -273,7 +273,7 @@ dependencies = [
 
 [[package]]
 name = "kura"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "crossterm 0.26.1",
  "image",
