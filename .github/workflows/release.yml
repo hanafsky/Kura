@@ -113,3 +113,4 @@ jobs:
           asset_path: kura-x86_64-pc-windows-msvc.zip
           asset_name: kura-x86_64-pc-windows-msvc.zip
           asset_content_type: application/zip
+
