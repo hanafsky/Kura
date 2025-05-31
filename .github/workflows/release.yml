@@ -47,7 +47,7 @@ jobs:
         run: zip -j kura-${{ matrix.target }}.zip target/${{ matrix.target }}/release/kura
 
       - name: Upload build artifact
-        uses: actions/upload-artifact@v2
+        uses: actions/upload-artifact@v3
         with:
           name: kura-${{ matrix.target }}
           path: kura-${{ matrix.target }}.zip
