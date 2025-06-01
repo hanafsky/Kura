@@ -1,8 +1,9 @@
 use std::{
+    cmp::Reverse,
     collections::HashSet,
     fs, io,
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, UNIX_EPOCH},
 };
 
 use crossterm::{
@@ -38,6 +39,19 @@ enum Mode {
     },
     ConfirmDelete {
         items: Vec<PathBuf>,
+    },
+    /// Search mode: prompt for a query and jump to matching entries
+    Search {
+        query: String,
+    },
+    /// Rename mode: inline editing of the selected filename
+    Rename {
+        original: String,
+        buffer: String,
+    },
+    /// Sort mode: choose a sort order for the file list
+    Sort {
+        selected: usize,
     },
 }
 
@@ -304,6 +318,69 @@ fn copy_dir_recursively(src: &Path, dst: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Find the next entry matching `query` (case-insensitive) after `start`, wrapping around.
+fn find_match(entries: &[fs::DirEntry], query: &str, start: usize) -> Option<usize> {
+    if query.is_empty() || entries.is_empty() {
+        return None;
+    }
+    let q = query.to_lowercase();
+    let total = entries.len();
+    for i in 1..=total {
+        let idx = (start + i) % total;
+        let name = entries[idx].file_name().to_string_lossy().to_lowercase();
+        if name.contains(&q) {
+            return Some(idx);
+        }
+    }
+    None
+}
+
+/// Criteria for sorting the file list.
+enum SortBy {
+    Modified,
+    Created,
+    Size,
+    Name,
+}
+
+/// Labels for sort options in the popup.
+static SORT_OPTIONS: &[&str] = &[
+    "Last modified date",
+    "Creation date",
+    "File size",
+    "Alphabetical",
+];
+
+/// Apply the chosen sort order to the given pane.
+fn apply_sort(pane: &mut Pane, by: SortBy) {
+    match by {
+        SortBy::Modified => pane.items.sort_by(|a, b| {
+            let ma = a
+                .metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(UNIX_EPOCH);
+            let mb = b
+                .metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(UNIX_EPOCH);
+            ma.cmp(&mb)
+        }),
+        SortBy::Created => pane.items.sort_by(|a, b| {
+            let ca = a.metadata().and_then(|m| m.created()).unwrap_or(UNIX_EPOCH);
+            let cb = b.metadata().and_then(|m| m.created()).unwrap_or(UNIX_EPOCH);
+            ca.cmp(&cb)
+        }),
+        SortBy::Size => pane
+            .items
+            .sort_by_key(|e| Reverse(e.metadata().map(|m| m.len()).unwrap_or(0))),
+        SortBy::Name => pane
+            .items
+            .sort_by_key(|e| e.file_name().to_string_lossy().to_lowercase()),
+    }
+    pane.selected = 0;
+    pane.marked.clear();
+}
+
 fn run_app<B: ratatui::backend::Backend + io::Write>(
     terminal: &mut Terminal<B>,
     app: &mut App,
@@ -318,8 +395,14 @@ fn run_app<B: ratatui::backend::Backend + io::Write>(
                 if key.code == KeyCode::Char('q') {
                     return Ok(());
                 }
+                // prepare for rename or sort commit after mode handling
+                let mut rename_target: Option<String> = None;
+                let mut sort_choice: Option<SortBy> = None;
                 if let KeyCode::Char(c) = key.code {
-                    if c.is_ascii_digit() {
+                    // Accumulate numeric prefixes only in normal filer or viewer modes
+                    if (matches!(app.mode, Mode::Filer) || matches!(app.mode, Mode::Viewer { .. }))
+                        && c.is_ascii_digit()
+                    {
                         prefix = prefix
                             .saturating_mul(10)
                             .saturating_add(c.to_digit(10).unwrap() as usize);
@@ -410,6 +493,102 @@ fn run_app<B: ratatui::backend::Backend + io::Write>(
                         }
                         _ => {}
                     }
+                }
+                // Search mode: edit query and jump to matching entries
+                if let Mode::Search { query } = &mut app.mode {
+                    match key.code {
+                        KeyCode::Char(c) => {
+                            query.push(c);
+                        }
+                        KeyCode::Backspace => {
+                            query.pop();
+                        }
+                        KeyCode::Enter | KeyCode::Esc => {
+                            app.mode = Mode::Filer;
+                        }
+                        _ => {}
+                    }
+                    // after updating query, perform search jump
+                }
+                // perform search jump if still in search mode
+                let q_opt = if let Mode::Search { query } = &app.mode {
+                    Some(query.clone())
+                } else {
+                    None
+                };
+                if let Some(q) = q_opt {
+                    let pane = app.current_pane_mut();
+                    if let Some(idx) = find_match(&pane.items, &q, pane.selected) {
+                        pane.selected = idx;
+                    }
+                    continue;
+                }
+                // Rename mode: edit new filename, commit on Enter
+                if let Mode::Rename { buffer, .. } = &mut app.mode {
+                    match key.code {
+                        KeyCode::Char(c) => {
+                            buffer.push(c);
+                        }
+                        KeyCode::Backspace => {
+                            buffer.pop();
+                        }
+                        KeyCode::Enter => {
+                            rename_target = Some(buffer.clone());
+                            app.mode = Mode::Filer;
+                        }
+                        KeyCode::Esc => {
+                            app.mode = Mode::Filer;
+                        }
+                        _ => {}
+                    }
+                }
+                // Sort mode: choose sort order via popup, commit on Enter
+                if let Mode::Sort { selected } = &mut app.mode {
+                    match key.code {
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            *selected = (*selected + 1) % SORT_OPTIONS.len();
+                        }
+                        KeyCode::Up | KeyCode::Char('k') => {
+                            *selected = (*selected + SORT_OPTIONS.len() - 1) % SORT_OPTIONS.len();
+                        }
+                        KeyCode::Enter => {
+                            let by = match *selected {
+                                0 => SortBy::Modified,
+                                1 => SortBy::Created,
+                                2 => SortBy::Size,
+                                _ => SortBy::Name,
+                            };
+                            sort_choice = Some(by);
+                            app.mode = Mode::Filer;
+                        }
+                        KeyCode::Esc => {
+                            app.mode = Mode::Filer;
+                        }
+                        _ => {}
+                    }
+                }
+                // apply rename if requested
+                if let Some(new_name) = rename_target {
+                    let pane = app.current_pane_mut();
+                    let old = pane.items[pane.selected].path();
+                    let newp = old.with_file_name(&new_name);
+                    if let Err(e) = fs::rename(&old, &newp) {
+                        eprintln!("Failed to rename {:?} to {:?}: {}", old, newp, e);
+                    }
+                    if pane.refresh().is_ok() {
+                        if let Some(pos) = pane
+                            .items
+                            .iter()
+                            .position(|e| e.file_name().to_string_lossy() == new_name)
+                        {
+                            pane.selected = pos;
+                        }
+                    }
+                    continue;
+                }
+                // apply sort if requested
+                if let Some(by) = sort_choice {
+                    apply_sort(app.current_pane_mut(), by);
                     continue;
                 }
                 match &mut app.mode {
@@ -502,6 +681,24 @@ fn run_app<B: ratatui::backend::Backend + io::Write>(
                             app.mode = Mode::Visual { anchor };
                         }
                         // toggle mark on current entry
+                        KeyCode::Char('/') => {
+                            app.mode = Mode::Search {
+                                query: String::new(),
+                            };
+                        }
+                        KeyCode::Char('r') => {
+                            let pane = app.current_pane_mut();
+                            if let Some(entry) = pane.items.get(pane.selected) {
+                                let name = entry.file_name().to_string_lossy().into_owned();
+                                app.mode = Mode::Rename {
+                                    original: name.clone(),
+                                    buffer: name,
+                                };
+                            }
+                        }
+                        KeyCode::Char('s') => {
+                            app.mode = Mode::Sort { selected: 0 };
+                        }
                         KeyCode::Char('v') => app.current_pane_mut().toggle_mark(),
                         KeyCode::Char('y') => app.copy_selection(),
                         KeyCode::Char('p') => app.paste(),
@@ -535,7 +732,17 @@ fn ui<B: ratatui::backend::Backend>(f: &mut Frame<B>, app: &App) {
     .alignment(Alignment::Center);
     f.render_widget(header, chunks[0]);
 
-    let area = chunks[1];
+    // split off a footer line for search or rename prompt if needed
+    let (content_area, footer_area) =
+        if matches!(app.mode, Mode::Search { .. } | Mode::Rename { .. }) {
+            let v = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(0), Constraint::Length(1)])
+                .split(chunks[1]);
+            (v[0], Some(v[1]))
+        } else {
+            (chunks[1], None)
+        };
     if let Mode::Viewer {
         content,
         title,
@@ -543,7 +750,7 @@ fn ui<B: ratatui::backend::Backend>(f: &mut Frame<B>, app: &App) {
     } = &app.mode
     {
         let block = Block::default().borders(Borders::ALL).title(title.as_str());
-        let inner_height = area.height.saturating_sub(2) as usize;
+        let inner_height = content_area.height.saturating_sub(2) as usize;
         let number_width = inner_height.to_string().len().max(1);
         // clamp offset to valid range to allow 'G' to scroll to bottom
         let total_lines = content.lines().count();
@@ -564,21 +771,16 @@ fn ui<B: ratatui::backend::Backend>(f: &mut Frame<B>, app: &App) {
         let paragraph = Paragraph::new(numbered)
             .block(block)
             .wrap(Wrap { trim: false });
-        f.render_widget(paragraph, area);
+        f.render_widget(paragraph, content_area);
     } else {
-        let chunks = Layout::default()
+        let panes = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-            .split(area);
+            .split(content_area);
+        draw_pane(f, panes[0], &app.left, matches!(app.active, PaneType::Left));
         draw_pane(
             f,
-            chunks[0],
-            &app.left,
-            matches!(app.active, PaneType::Left),
-        );
-        draw_pane(
-            f,
-            chunks[1],
+            panes[1],
             &app.right,
             matches!(app.active, PaneType::Right),
         );
@@ -595,6 +797,38 @@ fn ui<B: ratatui::backend::Backend>(f: &mut Frame<B>, app: &App) {
             .alignment(Alignment::Center);
         f.render_widget(Clear, popup);
         f.render_widget(paragraph, popup);
+    }
+
+    // Sort popup
+    if let Mode::Sort { selected } = &app.mode {
+        let popup = centered_rect(40, 20, f.size());
+        let block = Block::default().title("Sort By").borders(Borders::ALL);
+        let items: Vec<ListItem> = SORT_OPTIONS
+            .iter()
+            .enumerate()
+            .map(|(i, option)| {
+                let style = if i == *selected {
+                    Style::default().add_modifier(Modifier::REVERSED)
+                } else {
+                    Style::default()
+                };
+                ListItem::new(Spans::from(Span::styled(*option, style)))
+            })
+            .collect();
+        let list = List::new(items).block(block);
+        f.render_widget(Clear, popup);
+        f.render_widget(list, popup);
+    }
+
+    // Search/rename footer prompt
+    if let Some(footer) = footer_area {
+        let prompt = match &app.mode {
+            Mode::Search { query } => format!("/{query}"),
+            Mode::Rename { original, buffer } => format!("rename: {original} -> {buffer}"),
+            _ => String::new(),
+        };
+        let paragraph = Paragraph::new(prompt);
+        f.render_widget(paragraph, footer);
     }
 }
 
