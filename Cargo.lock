@@ -278,6 +278,7 @@ dependencies = [
  "crossterm 0.26.1",
  "image",
  "ratatui",
+ "unicode-width",
  "viuer",
 ]
 
