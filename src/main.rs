@@ -1,5 +1,3 @@
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
 use std::{
     collections::HashSet,
     fs, io,
@@ -625,14 +623,25 @@ fn draw_pane<B: ratatui::backend::Backend>(
                 Style::default().fg(Color::Blue)
             } else if name.starts_with('.') {
                 Style::default().fg(Color::Red)
-            } else if e
-                .metadata()
-                .map(|m| m.permissions().mode() & 0o111 != 0)
-                .unwrap_or(false)
-            {
-                Style::default().fg(Color::Green)
             } else {
-                Style::default()
+                let is_executable = {
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        e.metadata()
+                            .map(|m| m.permissions().mode() & 0o111 != 0)
+                            .unwrap_or(false)
+                    }
+                    #[cfg(windows)]
+                    {
+                        path.extension().map_or(false, |ext| ext == "exe")
+                    }
+                };
+                if is_executable {
+                    Style::default().fg(Color::Green)
+                } else {
+                    Style::default()
+                }
             };
             let marker = if pane.marked.contains(&i) { "*" } else { " " };
             ListItem::new(Spans::from(vec![
