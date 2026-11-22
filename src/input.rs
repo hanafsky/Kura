@@ -14,7 +14,7 @@ use crate::fs_utils::{apply_sort, find_match, is_image, SortBy, SORT_OPTIONS};
 use crate::mode::{Mode, PaneType};
 
 /// Display the image at `path` using `viuer` and wait for Enter to return.
-pub fn show_image<B: Backend + Write>(terminal: &mut Terminal<B>, path: &Path) -> io::Result<()> {
+pub fn show_image<B: Backend<Error = io::Error> + Write>(terminal: &mut Terminal<B>, path: &Path) -> io::Result<()> {
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
@@ -48,7 +48,7 @@ pub fn show_image<B: Backend + Write>(terminal: &mut Terminal<B>, path: &Path) -
 }
 
 /// Main event loop: handles input and dispatches actions.
-pub fn run_app<B: Backend + Write>(terminal: &mut Terminal<B>, app: &mut App) -> io::Result<()> {
+pub fn run_app<B: Backend<Error = io::Error> + Write>(terminal: &mut Terminal<B>, app: &mut App) -> io::Result<()> {
     let mut prefix: usize = 0;
     let mut last_key_g = false;
     loop {

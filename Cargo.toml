@@ -4,8 +4,8 @@ version = "0.1.9"
 edition = "2021"
 
 [dependencies]
-crossterm = "0.26"
-ratatui = { version = "0.20", features = ["crossterm"] }
+crossterm = "0.29"
+ratatui = "0.30"
 image = "0.23"
 viuer = "0.4"
 unicode-width = "0.1"

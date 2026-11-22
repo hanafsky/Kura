@@ -1,8 +1,7 @@
 use ratatui::{
-    backend::Backend,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
-    text::{Span, Spans},
+    text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
     Frame,
 };
@@ -10,14 +9,14 @@ use ratatui::{
 use crate::{app::App, app::Pane, mode::Mode, mode::PaneType};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-pub fn ui<B: Backend>(f: &mut Frame<B>, app: &App) {
-    let size = f.size();
+pub fn ui(f: &mut Frame, app: &App) {
+    let size = f.area();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(1), Constraint::Min(0)])
         .split(size);
 
-    let header = Paragraph::new(Spans::from(vec![
+    let header = Paragraph::new(Line::from(vec![
         Span::styled(
             "蔵",
             Style::default()
@@ -90,14 +89,14 @@ pub fn ui<B: Backend>(f: &mut Frame<B>, app: &App) {
         let total_rows = rows.len();
         let max_off = total_rows.saturating_sub(inner_height);
         let start = (*offset as usize).min(max_off) as usize;
-        let numbered: Vec<Spans> = rows
+        let numbered: Vec<Line> = rows
             .iter()
             .skip(start)
             .take(inner_height)
             .enumerate()
             .map(|(i, row)| {
                 let num = format!("{:>width$} ", i, width = number_width);
-                Spans::from(vec![
+                Line::from(vec![
                     Span::styled(num, Style::default().fg(Color::DarkGray)),
                     Span::raw(row),
                 ])
@@ -115,7 +114,7 @@ pub fn ui<B: Backend>(f: &mut Frame<B>, app: &App) {
     }
 
     if let Mode::ConfirmDelete { items } = &app.mode {
-        let popup = centered_rect(40, 20, f.size());
+        let popup = centered_rect(40, 20, f.area());
         let block = Block::default()
             .title("Confirm Deletion")
             .borders(Borders::ALL);
@@ -128,7 +127,7 @@ pub fn ui<B: Backend>(f: &mut Frame<B>, app: &App) {
     }
 
     if let Mode::Sort { selected } = &app.mode {
-        let popup = centered_rect(40, 20, f.size());
+        let popup = centered_rect(40, 20, f.area());
         let block = Block::default().title("Sort By").borders(Borders::ALL);
         let items: Vec<ListItem> = crate::fs_utils::SORT_OPTIONS
             .iter()
@@ -139,7 +138,7 @@ pub fn ui<B: Backend>(f: &mut Frame<B>, app: &App) {
                 } else {
                     Style::default()
                 };
-                ListItem::new(Spans::from(Span::styled(*option, style)))
+                ListItem::new(Line::from(Span::styled(*option, style)))
             })
             .collect();
         let list = List::new(items).block(block);
@@ -158,7 +157,7 @@ pub fn ui<B: Backend>(f: &mut Frame<B>, app: &App) {
     }
 }
 
-fn draw_pane<B: Backend>(f: &mut Frame<B>, area: Rect, pane: &Pane, active: bool) {
+fn draw_pane(f: &mut Frame, area: Rect, pane: &Pane, active: bool) {
     let title = format!(" {} ", pane.current_dir.display());
     let block = Block::default().borders(Borders::ALL).title(Span::styled(
         title,
@@ -198,7 +197,7 @@ fn draw_pane<B: Backend>(f: &mut Frame<B>, area: Rect, pane: &Pane, active: bool
                 }
             };
             let marker = if pane.marked.contains(&i) { "*" } else { " " };
-            ListItem::new(Spans::from(vec![
+            ListItem::new(Line::from(vec![
                 Span::raw(format!("{marker} ")),
                 Span::styled(name, style),
             ]))
