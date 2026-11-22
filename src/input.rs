@@ -55,7 +55,9 @@ pub fn run_app<B: Backend + Write>(terminal: &mut Terminal<B>, app: &mut App) ->
         terminal.draw(|f| crate::ui::ui(f, app))?;
         if event::poll(Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
-                if key.code == KeyCode::Char('q') {
+                // Text-input modes must receive every character (including 'q', 'g', 'G').
+                let text_input = matches!(app.mode, Mode::Search { .. } | Mode::Rename { .. });
+                if key.code == KeyCode::Char('q') && !text_input {
                     return Ok(());
                 }
                 let mut rename_target: Option<String> = None;
@@ -75,7 +77,7 @@ pub fn run_app<B: Backend + Write>(terminal: &mut Terminal<B>, app: &mut App) ->
                 prefix = 0;
 
                 // Vim-style 'gg' (go to top) and 'G' (go to bottom)
-                if let KeyCode::Char(c) = key.code {
+                if let (KeyCode::Char(c), false) = (key.code, text_input) {
                     match c {
                         'g' => {
                             if last_key_g {
