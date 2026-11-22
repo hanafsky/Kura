@@ -2,6 +2,7 @@ mod actions;
 mod app;
 mod fs_utils;
 mod input;
+mod input_source;
 mod mode;
 mod ui;
 
@@ -16,6 +17,8 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Start in ASCII (英数) input so Vim-like keys work immediately.
+    input_source::select(input_source::ASCII_INPUT_SOURCE);
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
