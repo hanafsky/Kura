@@ -240,6 +240,7 @@ mod tests {
             run(&f, &[ch('X')]),
             [Command::Delete(DeleteKind::Permanent)]
         );
+        assert_eq!(run(&f, &[ch('x')]), [Command::Delete(DeleteKind::Normal)]);
         assert_eq!(run(&f, &[ch('p')]), [Command::Paste]);
         assert_eq!(run(&f, &[ch('z')]), []);
         assert_eq!(run(&f, &[KeyCode::Down]), []);
