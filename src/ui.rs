@@ -8,14 +8,23 @@ use ratatui::{
 
 use ratatui_image::{Resize, StatefulImage};
 
-use crate::{app::App, app::Pane, media::Preview, mode::Mode, mode::PaneType};
+use crate::{
+    app::{App, MessageLevel, Pane},
+    media::Preview,
+    mode::Mode,
+    mode::PaneType,
+};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 pub fn ui(f: &mut Frame, app: &mut App) {
     let size = f.area();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(0),
+            Constraint::Length(1),
+        ])
         .split(size);
 
     let header = Paragraph::new(Line::from(vec![
@@ -166,6 +175,8 @@ pub fn ui(f: &mut Frame, app: &mut App) {
         f.render_widget(list, popup);
     }
 
+    draw_status_line(f, chunks[2], app);
+
     if let Some(footer) = footer_area {
         let prompt = match &app.mode {
             Mode::Search { query } => format!("/{query}"),
@@ -179,6 +190,42 @@ pub fn ui(f: &mut Frame, app: &mut App) {
         let paragraph = Paragraph::new(prompt);
         f.render_widget(paragraph, footer);
     }
+}
+
+/// Bottom status line: the latest message on the left, cursor position and
+/// selection count on the right.
+fn draw_status_line(f: &mut Frame, area: Rect, app: &App) {
+    let pane = app.current_pane();
+    let mut info = if pane.items.is_empty() {
+        "0/0".to_string()
+    } else {
+        format!("{}/{}", pane.selected + 1, pane.items.len())
+    };
+    let marked = pane.marked_count();
+    if marked > 0 {
+        info = format!("{marked} selected  {info}");
+    }
+    let info_width = (UnicodeWidthStr::width(info.as_str()) as u16).min(area.width);
+    let parts = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(0), Constraint::Length(info_width + 1)])
+        .split(area);
+
+    if let Some(message) = &app.message {
+        let style = match message.level {
+            MessageLevel::Error => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            MessageLevel::Info => Style::default().fg(Color::Green),
+        };
+        f.render_widget(
+            Paragraph::new(Span::styled(message.text.as_str(), style)),
+            parts[0],
+        );
+    }
+    f.render_widget(
+        Paragraph::new(Span::styled(info, Style::default().fg(Color::DarkGray)))
+            .alignment(Alignment::Right),
+        parts[1],
+    );
 }
 
 fn draw_pane(f: &mut Frame, area: Rect, pane: &Pane, active: bool) {

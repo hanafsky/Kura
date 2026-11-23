@@ -2,7 +2,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::app::{App, Pane};
+use crate::app::{fs_error_message, App, Pane};
 use crate::fs_utils::{copy_entry, is_same_location, paste_destination};
 
 /// Toggle mark on the selected entry in the given pane.
@@ -31,7 +31,9 @@ pub fn copy_selection(app: &mut App) {
         pane.marked.clear();
         items
     };
+    let n = items.len();
     app.clipboard = items;
+    app.notify_info(format!("Copied {n} item(s) to clipboard"));
 }
 
 /// Paste clipboard entries into the current directory.
@@ -65,19 +67,28 @@ fn paste_one(src: &Path, dst_dir: &Path) -> io::Result<()> {
 
 /// Delete the given files or directories from disk and refresh the pane.
 pub fn delete_items(app: &mut App, items: &[PathBuf]) {
-    let pane = app.current_pane_mut();
+    let mut deleted = 0;
+    let mut failed = 0;
+    let mut first_err: Option<String> = None;
     for path in items {
-        if path.is_dir() {
-            if let Err(e) = fs::remove_dir_all(path) {
-                eprintln!("Failed to delete directory {:?}: {}", path, e);
-            }
+        let res = if path.is_dir() {
+            fs::remove_dir_all(path)
         } else {
-            if let Err(e) = fs::remove_file(path) {
-                eprintln!("Failed to delete file {:?}: {}", path, e);
+            fs::remove_file(path)
+        };
+        match res {
+            Ok(()) => deleted += 1,
+            Err(e) => {
+                failed += 1;
+                first_err.get_or_insert_with(|| fs_error_message(&e, path));
             }
         }
     }
-    let _ = pane.refresh();
+    let _ = app.current_pane_mut().refresh();
+    match first_err {
+        None => app.notify_info(format!("Deleted {deleted} item(s)")),
+        Some(first) => app.notify_error(format!("{first} (deleted {deleted}, failed {failed})")),
+    }
 }
 
 #[cfg(test)]
