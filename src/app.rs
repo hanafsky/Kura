@@ -7,6 +7,7 @@ use std::{
 use ratatui_image::picker::Picker;
 
 use crate::fs_utils::{sort_entries, SortBy};
+use crate::git::{self, FileStatus, GitStatus};
 use crate::media::{self, Preview};
 use crate::mode::{Mode, PaneType};
 
@@ -20,6 +21,11 @@ pub struct Pane {
     pub sort: Option<SortBy>,
     /// List directories before files (on by default).
     pub dirs_first: bool,
+    /// Cached git status of `current_dir` (`None` outside a repository).
+    /// Updated only when the directory is (re)loaded.
+    pub git: Option<GitStatus>,
+    /// Show only entries with git changes (toggled with `M`).
+    pub git_filter: bool,
 }
 
 /// Read a directory's entries in the given order. Entries that cannot be
@@ -34,9 +40,35 @@ fn read_entries(
     Ok(entries)
 }
 
+fn is_dir_entry(e: &fs::DirEntry) -> bool {
+    e.file_type().is_ok_and(|t| t.is_dir())
+}
+
+/// Git status of a listed entry.
+fn entry_status(git: Option<&GitStatus>, e: &fs::DirEntry) -> Option<FileStatus> {
+    git?.lookup(&e.file_name().to_string_lossy(), is_dir_entry(e))
+}
+
+/// Keep only entries with git changes when the filter is on (and the
+/// directory is in a repository).
+fn filter_entries(
+    entries: Vec<fs::DirEntry>,
+    git: Option<&GitStatus>,
+    changed_only: bool,
+) -> Vec<fs::DirEntry> {
+    if !changed_only || git.is_none() {
+        return entries;
+    }
+    entries
+        .into_iter()
+        .filter(|e| entry_status(git, e).is_some_and(FileStatus::is_change))
+        .collect()
+}
+
 impl Pane {
     pub fn new(path: PathBuf) -> io::Result<Self> {
         let entries = read_entries(&path, None, true)?;
+        let git = git::read_status(&path);
         Ok(Self {
             items: entries,
             selected: 0,
@@ -44,6 +76,8 @@ impl Pane {
             marked: HashSet::new(),
             sort: None,
             dirs_first: true,
+            git,
+            git_filter: false,
         })
     }
 
@@ -55,12 +89,41 @@ impl Pane {
     /// Re-read the directory. The cursor stays on the same file (or the
     /// same row if that file is gone) and marks on files that still exist.
     pub fn refresh(&mut self) -> io::Result<()> {
+        self.git = git::read_status(&self.current_dir);
+        self.reload()
+    }
+
+    /// Re-read the listing using the cached git status. The cursor stays on
+    /// the same file (or row) and only marks on listed entries are kept, so
+    /// entries hidden by the git filter are never acted on.
+    fn reload(&mut self) -> io::Result<()> {
         let cursor = self.selected_path();
-        self.items = read_entries(&self.current_dir, self.sort, self.dirs_first)?;
+        let entries = read_entries(&self.current_dir, self.sort, self.dirs_first)?;
+        self.items = filter_entries(entries, self.git.as_ref(), self.git_filter);
         self.restore_cursor(cursor);
         let present: HashSet<PathBuf> = self.items.iter().map(|e| e.path()).collect();
         self.marked.retain(|p| present.contains(p));
         Ok(())
+    }
+
+    /// Git status of a listed entry (from the cached status).
+    pub fn git_status_of(&self, e: &fs::DirEntry) -> Option<FileStatus> {
+        entry_status(self.git.as_ref(), e)
+    }
+
+    /// Whether the changed-only filter is currently in effect.
+    pub fn git_filter_active(&self) -> bool {
+        self.git_filter && self.git.is_some()
+    }
+
+    /// Toggle the changed-only filter using the cached git status.
+    pub fn toggle_git_filter(&mut self) -> io::Result<()> {
+        self.git_filter = !self.git_filter;
+        let result = self.reload();
+        if result.is_err() {
+            self.git_filter = !self.git_filter;
+        }
+        result
     }
 
     /// Re-order the listing with the current sort settings, keeping the
@@ -91,7 +154,8 @@ impl Pane {
     /// on error the current directory and listing are left untouched.
     pub fn change_dir(&mut self, path: PathBuf) -> io::Result<()> {
         let entries = read_entries(&path, self.sort, self.dirs_first)?;
-        self.items = entries;
+        self.git = git::read_status(&path);
+        self.items = filter_entries(entries, self.git.as_ref(), self.git_filter);
         self.current_dir = path;
         self.selected = 0;
         self.marked.clear();
@@ -252,6 +316,26 @@ impl App {
         }
     }
 
+    /// Toggle the changed-only filter of the active pane (`M`).
+    pub fn toggle_git_filter(&mut self) {
+        let pane = self.current_pane_mut();
+        if pane.git.is_none() {
+            self.notify_info("Not a git repository");
+            return;
+        }
+        if let Err(e) = pane.toggle_git_filter() {
+            let dir = pane.current_dir.clone();
+            self.notify_error(fs_error_message(&e, &dir));
+            return;
+        }
+        let text = if pane.git_filter {
+            "Showing changed files only"
+        } else {
+            "Showing all files"
+        };
+        self.notify_info(text);
+    }
+
     /// Path of the entry under the cursor in the active pane.
     pub fn selected_path(&self) -> Option<PathBuf> {
         self.current_pane().selected_path()
@@ -398,6 +482,75 @@ mod tests {
 
         assert_eq!(pane.current_dir, root);
         assert_eq!(pane.items[pane.selected].file_name(), "b");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// Run git in `dir` for test setup; returns false if git is unavailable.
+    fn git(dir: &Path, args: &[&str]) -> bool {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_WORK_TREE")
+            .output()
+            .is_ok_and(|o| o.status.success())
+    }
+
+    #[test]
+    fn git_filter_shows_only_changed_entries() {
+        let root = temp_dir("git-filter");
+        if !git(&root, &["init", "-q", "-b", "main"]) {
+            fs::remove_dir_all(&root).unwrap();
+            return;
+        }
+        fs::create_dir(root.join("clean")).unwrap();
+        fs::write(root.join("clean").join("c"), "c").unwrap();
+        fs::create_dir(root.join("dirty")).unwrap();
+        fs::write(root.join("dirty").join("d"), "d").unwrap();
+        fs::write(root.join("same"), "s").unwrap();
+        fs::write(root.join("changed"), "1").unwrap();
+        assert!(git(&root, &["add", "."]));
+        assert!(git(&root, &["commit", "-qm", "init"]));
+        fs::write(root.join("changed"), "2").unwrap();
+        fs::write(root.join("dirty").join("d"), "2").unwrap();
+        fs::write(root.join("new"), "n").unwrap();
+
+        let mut pane = Pane::new(root.clone()).unwrap();
+        let git_status = pane.git.as_ref().expect("inside a repository");
+        assert_eq!(git_status.branch.as_deref(), Some("main"));
+        let status = |pane: &Pane, name: &str| {
+            let e = pane.items.iter().find(|e| e.file_name() == name).unwrap();
+            pane.git_status_of(e)
+        };
+        assert_eq!(status(&pane, "changed"), Some(FileStatus::Modified));
+        assert_eq!(status(&pane, "new"), Some(FileStatus::Untracked));
+        assert_eq!(status(&pane, "dirty"), Some(FileStatus::DirtyDir));
+        assert_eq!(status(&pane, "same"), None);
+
+        pane.selected = pane
+            .items
+            .iter()
+            .position(|e| e.file_name() == "new")
+            .unwrap();
+        pane.marked.insert(root.join("same"));
+        pane.marked.insert(root.join("new"));
+        pane.toggle_git_filter().unwrap();
+        let names: Vec<_> = pane.items.iter().map(|e| e.file_name()).collect();
+        assert_eq!(names, ["dirty", "changed", "new"]); // directories first
+        assert_eq!(pane.items[pane.selected].file_name(), "new");
+        // Marks on hidden entries are dropped so they are never acted on.
+        assert_eq!(pane.marked, HashSet::from([root.join("new")]));
+
+        // Paths resolve against the shown subdirectory, not the repo root.
+        pane.change_dir(root.join("dirty")).unwrap();
+        assert_eq!(status(&pane, "d"), Some(FileStatus::Modified));
+
+        pane.go_parent().unwrap();
+        pane.toggle_git_filter().unwrap();
+        assert_eq!(pane.items.len(), 6); // .git, changed, clean, dirty, new, same
         fs::remove_dir_all(&root).unwrap();
     }
 }
