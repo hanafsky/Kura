@@ -20,7 +20,8 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use crate::app::{App, Pane};
+use crate::actions::target_paths;
+use crate::app::App;
 
 pub const CLIPBOARD_ENV: &str = "KURA_CLIPBOARD";
 pub const PATH_STYLE_ENV: &str = "KURA_AT_PATH";
@@ -237,12 +238,14 @@ fn native_payload(method: Method, text: &str) -> Vec<u8> {
     }
 }
 
+#[cfg_attr(test, allow(dead_code))]
 fn write_osc52(text: &str) -> io::Result<()> {
     let mut out = io::stdout();
     out.write_all(osc52_sequence(text).as_bytes())?;
     out.flush()
 }
 
+#[cfg_attr(test, allow(dead_code))]
 fn run_native(method: Method, text: &str) -> io::Result<()> {
     let Some((program, args)) = native_command(method) else {
         return Err(io::Error::other("not a native method"));
@@ -267,6 +270,7 @@ fn run_native(method: Method, text: &str) -> io::Result<()> {
 }
 
 /// Write `text` as the plan says. Succeeds if any write succeeded.
+#[cfg_attr(test, allow(dead_code))]
 fn copy_text(text: &str, plan: &Plan) -> Result<(), String> {
     let mut ok = false;
     let mut last_err = String::from("no clipboard method available");
@@ -289,38 +293,40 @@ fn copy_text(text: &str, plan: &Plan) -> Result<(), String> {
     }
 }
 
-/// Marked entries in list order, or the entry under the cursor.
-fn target_paths(pane: &Pane) -> Vec<PathBuf> {
-    if pane.marked.is_empty() {
-        return pane
-            .items
-            .get(pane.selected)
-            .map(|e| e.path())
-            .into_iter()
-            .collect();
-    }
-    let mut idx: Vec<usize> = pane.marked.iter().copied().collect();
-    idx.sort_unstable();
-    idx.iter()
-        .filter_map(|&i| pane.items.get(i).map(|e| e.path()))
-        .collect()
-}
-
 /// Copy the marked entries (or the cursor entry) as `@path` references.
 pub fn copy_at_paths(app: &mut App) {
-    let paths = target_paths(app.current_pane());
+    let paths = target_paths(app);
     if paths.is_empty() {
         return;
     }
     let style = PathStyle::from_env_value(std::env::var(PATH_STYLE_ENV).ok().as_deref());
     let text = format_at_paths(&paths, &app.launch_dir, style);
-    match copy_text(&text, &choose_plan(&ClipEnv::current())) {
+    match deliver(&text, &choose_plan(&ClipEnv::current())) {
         Ok(_) => {
             app.current_pane_mut().marked.clear();
             app.notify_info(format!("Copied {} path(s)", paths.len()));
         }
         Err(e) => app.notify_error(format!("Copy failed: {e}")),
     }
+}
+
+#[cfg(not(test))]
+fn deliver(text: &str, plan: &Plan) -> Result<(), String> {
+    copy_text(text, plan)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Text the last `copy_at_paths` would have put on the clipboard.
+    pub static LAST_COPY: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Tests never touch the real terminal or clipboard.
+#[cfg(test)]
+fn deliver(text: &str, _plan: &Plan) -> Result<(), String> {
+    LAST_COPY.with(|c| *c.borrow_mut() = Some(text.to_string()));
+    Ok(())
 }
 
 #[cfg(test)]
