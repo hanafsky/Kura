@@ -6,11 +6,13 @@
 //! A path containing whitespace is written as `@"path"`, the quoted form the
 //! Claude Code CLI accepts. Several paths are separated by a single space.
 //!
-//! The text is sent with OSC 52 first, so it also reaches the outer terminal
-//! through tmux / herdr / ssh. Native tools (pbcopy, wl-copy, xclip,
-//! clip.exe) are the fallback. Environment variables:
+//! The text is sent with OSC 52, so it also reaches the outer terminal
+//! through tmux / herdr / ssh. Whether the terminal accepted OSC 52 cannot be
+//! detected, so outside ssh the native tools (pbcopy, wl-copy, xclip,
+//! clip.exe) are written as well. Environment variables:
 //!
-//! - `KURA_CLIPBOARD`: `auto` (default: OSC 52, then native), `osc52`, `native`
+//! - `KURA_CLIPBOARD`: `auto` (default: OSC 52 and native; OSC 52 only over
+//!   ssh), `osc52`, `native`
 //! - `KURA_AT_PATH`: `relative` (default) or `absolute`
 
 use std::fs;
@@ -71,6 +73,13 @@ pub struct ClipEnv {
     pub wsl: bool,
     pub wayland: bool,
     pub x11: bool,
+    /// Running over ssh (see [`is_ssh`]).
+    pub ssh: bool,
+}
+
+/// Over ssh when any of `SSH_CONNECTION` / `SSH_TTY` / `SSH_CLIENT` is set.
+pub fn is_ssh(connection: Option<&str>, tty: Option<&str>, client: Option<&str>) -> bool {
+    [connection, tty, client].iter().any(Option::is_some)
 }
 
 impl ClipEnv {
@@ -84,6 +93,11 @@ impl ClipEnv {
             wsl: crate::media::is_wsl(distro.as_deref(), osrelease.as_deref()),
             wayland: non_empty("WAYLAND_DISPLAY"),
             x11: non_empty("DISPLAY"),
+            ssh: is_ssh(
+                std::env::var("SSH_CONNECTION").ok().as_deref(),
+                std::env::var("SSH_TTY").ok().as_deref(),
+                std::env::var("SSH_CLIENT").ok().as_deref(),
+            ),
         }
     }
 }
@@ -106,22 +120,37 @@ fn native_methods(env: &ClipEnv) -> Vec<Method> {
     methods
 }
 
-/// Methods to try, in order; the first one that succeeds wins.
-/// Unknown `KURA_CLIPBOARD` values are treated as `auto`.
-pub fn choose_methods(env: &ClipEnv) -> Vec<Method> {
-    match env
-        .mode
-        .as_deref()
-        .map(|m| m.trim().to_ascii_lowercase())
-        .as_deref()
-    {
-        Some("osc52") => vec![Method::Osc52],
-        Some("native") => native_methods(env),
-        _ => {
-            let mut methods = vec![Method::Osc52];
-            methods.extend(native_methods(env));
-            methods
-        }
+/// How to write the clipboard: OSC 52 and/or native tools.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Plan {
+    /// Emit the OSC 52 sequence.
+    pub osc52: bool,
+    /// Native tools to try in order; the first that succeeds is used.
+    pub native: Vec<Method>,
+}
+
+/// Decide how to write the clipboard. Unknown `KURA_CLIPBOARD` values are
+/// treated as `auto`: OSC 52 plus native tools locally, OSC 52 only over ssh
+/// (a native tool there would write the remote host's clipboard).
+pub fn choose_plan(env: &ClipEnv) -> Plan {
+    let mode = env.mode.as_deref().map(|m| m.trim().to_ascii_lowercase());
+    match mode.as_deref() {
+        Some("osc52") => Plan {
+            osc52: true,
+            native: Vec::new(),
+        },
+        Some("native") => Plan {
+            osc52: false,
+            native: native_methods(env),
+        },
+        _ if env.ssh => Plan {
+            osc52: true,
+            native: Vec::new(),
+        },
+        _ => Plan {
+            osc52: true,
+            native: native_methods(env),
+        },
     }
 }
 
@@ -237,20 +266,27 @@ fn run_native(method: Method, text: &str) -> io::Result<()> {
     }
 }
 
-/// Put `text` on the clipboard with the first method that works.
-fn copy_text(text: &str, methods: &[Method]) -> Result<Method, String> {
+/// Write `text` as the plan says. Succeeds if any write succeeded.
+fn copy_text(text: &str, plan: &Plan) -> Result<(), String> {
+    let mut ok = false;
     let mut last_err = String::from("no clipboard method available");
-    for &method in methods {
-        let result = match method {
-            Method::Osc52 => write_osc52(text),
-            _ => run_native(method, text),
-        };
-        match result {
-            Ok(()) => return Ok(method),
+    if plan.osc52 {
+        match write_osc52(text) {
+            Ok(()) => ok = true,
+            Err(e) => last_err = format!("{}: {e}", Method::Osc52.name()),
+        }
+    }
+    for &method in &plan.native {
+        match run_native(method, text) {
+            Ok(()) => return Ok(()),
             Err(e) => last_err = format!("{}: {e}", method.name()),
         }
     }
-    Err(last_err)
+    if ok {
+        Ok(())
+    } else {
+        Err(last_err)
+    }
 }
 
 /// Marked entries in list order, or the entry under the cursor.
@@ -278,7 +314,7 @@ pub fn copy_at_paths(app: &mut App) {
     }
     let style = PathStyle::from_env_value(std::env::var(PATH_STYLE_ENV).ok().as_deref());
     let text = format_at_paths(&paths, &app.launch_dir, style);
-    match copy_text(&text, &choose_methods(&ClipEnv::current())) {
+    match copy_text(&text, &choose_plan(&ClipEnv::current())) {
         Ok(_) => {
             app.current_pane_mut().marked.clear();
             app.notify_info(format!("Copied {} path(s)", paths.len()));
@@ -384,30 +420,56 @@ mod tests {
         }
     }
 
+    fn plan(osc52: bool, native: &[Method]) -> Plan {
+        Plan {
+            osc52,
+            native: native.to_vec(),
+        }
+    }
+
     #[test]
-    fn auto_prefers_osc52_then_native() {
+    fn ssh_detection() {
+        assert!(!is_ssh(None, None, None));
+        assert!(is_ssh(Some("1.2.3.4 5 6.7.8.9 22"), None, None));
+        assert!(is_ssh(None, Some("/dev/pts/0"), None));
+        assert!(is_ssh(None, None, Some("1.2.3.4 5 22")));
+    }
+
+    #[test]
+    fn auto_local_writes_osc52_and_native() {
         let mac = ClipEnv {
             macos: true,
             ..env(None)
         };
-        assert_eq!(choose_methods(&mac), vec![Method::Osc52, Method::Pbcopy]);
+        assert_eq!(choose_plan(&mac), plan(true, &[Method::Pbcopy]));
         let wsl = ClipEnv {
             wsl: true,
             x11: true,
             ..env(Some("auto"))
         };
-        assert_eq!(choose_methods(&wsl), vec![Method::Osc52, Method::ClipExe]);
+        assert_eq!(choose_plan(&wsl), plan(true, &[Method::ClipExe]));
         let linux = ClipEnv {
             wayland: true,
             x11: true,
             ..env(None)
         };
         assert_eq!(
-            choose_methods(&linux),
-            vec![Method::Osc52, Method::WlCopy, Method::Xclip]
+            choose_plan(&linux),
+            plan(true, &[Method::WlCopy, Method::Xclip])
         );
-        // Headless (e.g. ssh): only OSC 52.
-        assert_eq!(choose_methods(&env(None)), vec![Method::Osc52]);
+        // No display server: nothing native to try.
+        assert_eq!(choose_plan(&env(None)), plan(true, &[]));
+    }
+
+    #[test]
+    fn auto_over_ssh_is_osc52_only() {
+        let remote = ClipEnv {
+            ssh: true,
+            x11: true,
+            macos: true,
+            ..env(None)
+        };
+        assert_eq!(choose_plan(&remote), plan(true, &[]));
     }
 
     #[test]
@@ -416,17 +478,16 @@ mod tests {
             macos: true,
             ..env(Some(m))
         };
-        assert_eq!(choose_methods(&mac("osc52")), vec![Method::Osc52]);
-        assert_eq!(choose_methods(&mac("NATIVE")), vec![Method::Pbcopy]);
-        assert_eq!(
-            choose_methods(&mac("bogus")),
-            vec![Method::Osc52, Method::Pbcopy]
-        );
-        let x11 = ClipEnv {
+        assert_eq!(choose_plan(&mac("osc52")), plan(true, &[]));
+        assert_eq!(choose_plan(&mac("NATIVE")), plan(false, &[Method::Pbcopy]));
+        assert_eq!(choose_plan(&mac("bogus")), plan(true, &[Method::Pbcopy]));
+        // Explicit modes ignore ssh.
+        let ssh_native = ClipEnv {
+            ssh: true,
             x11: true,
             ..env(Some("native"))
         };
-        assert_eq!(choose_methods(&x11), vec![Method::Xclip]);
+        assert_eq!(choose_plan(&ssh_native), plan(false, &[Method::Xclip]));
     }
 
     #[test]

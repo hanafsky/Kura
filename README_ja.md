@@ -105,7 +105,7 @@ sudo apt install ffmpeg
 - `y`: カーソル行またはマークされたすべてのエントリをクリップボードにコピーします。
 - `p`: コピーしたエントリを現在のディレクトリに貼り付けます。
 - `Y`: カーソル行またはマークされたすべてのエントリを、Claude Code などのコーディングエージェント向けの `@path` 形式でシステムのクリップボードにコピーします（例: `@src/main.rs @"docs/my notes.md"`）。パスは kura を起動したディレクトリからの相対パスで（その外にあるパスは絶対パス）、空白で区切られます。スペースを含むパスは `@"..."` のように引用符で囲みます。
-  書き込みはまず OSC 52 エスケープシーケンスで行い（tmux・herdr・ssh 越しでも届きます）、使えない場合は `pbcopy`（macOS）、`wl-copy` / `xclip`（Linux）、`clip.exe`（WSL）を使います。tmux 内では `~/.tmux.conf` に `set -g set-clipboard on` を設定してください。kura からは端末が OSC 52 を受け付けたか判別できないため、OSC 52 に対応していない端末（macOS のターミナル.app など）では `KURA_CLIPBOARD=native` を指定してください。`KURA_CLIPBOARD` には `auto`（既定）・`osc52`・`native` を指定できます。`KURA_AT_PATH=absolute` で常に絶対パスにします。
+  書き込みは OSC 52 エスケープシーケンスで行います（tmux・herdr・ssh 越しでも届きます）。kura からは端末が OSC 52 を受け付けたか判別できないため、`pbcopy`（macOS）、`wl-copy` / `xclip`（Linux）、`clip.exe`（WSL）にも書き込みます。ただし ssh 越し（`SSH_CONNECTION` / `SSH_TTY` / `SSH_CLIENT` のいずれかが設定されている）では OSC 52 だけを使います。tmux 内では `~/.tmux.conf` に `set -g set-clipboard on` を設定してください。`KURA_CLIPBOARD` には `auto`（既定。上記の動作）・`osc52`（OSC 52 のみ）・`native`（ネイティブのツールのみ）を指定できます。`KURA_AT_PATH=absolute` で常に絶対パスにします。
 - `/`: 検索モードに入ります。クエリを入力すると、ファイルリスト内の一致するエントリにジャンプします。EnterまたはEscで検索を終了します。
 - `r`: 選択中のファイル名を変更します。下部にリネーム用プロンプトが表示されます。
 - `s`: ソートモードを開き、ポップアップで最終更新日、作成日、ファイル容量、名前順を選択できます。
