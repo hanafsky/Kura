@@ -100,6 +100,7 @@ sudo apt install ffmpeg
 
 - `Enter`: Enter the selected directory, open the text viewer for a text file, or show an image / video preview in the opposite pane. Press `Enter` (or `Esc` in preview) again to return to the file manager.
 - `o`: Open the selected entry with the default application (`open` on macOS), e.g. play a video in QuickTime. Works in the file list and in preview.
+  On WSL the path is converted with `wslpath -w` and opened by `explorer.exe`. Set `KURA_OPENER` to use another program; it is split on whitespace and run as `<program> <args...> <path>` (e.g. `KURA_OPENER="code -r"` → `code -r <path>`).
 - `v`: Toggle selection of the current entry in file manager mode. Selected entries are marked with a `*` symbol.
 - `y`: Copy the current entry or all marked entries to the clipboard.
 - `p`: Paste copied entries into the current directory.
