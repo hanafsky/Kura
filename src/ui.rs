@@ -10,6 +10,7 @@ use ratatui_image::{Resize, StatefulImage};
 
 use crate::{
     app::{App, MessageLevel, Pane},
+    delete_confirm::{dialog_lines, dialog_title, DeleteKind},
     media::Preview,
     mode::Mode,
     mode::PaneType,
@@ -142,17 +143,8 @@ pub fn ui(f: &mut Frame, app: &mut App) {
         }
     }
 
-    if let Mode::ConfirmDelete { items } = &app.mode {
-        let popup = centered_rect(40, 20, f.area());
-        let block = Block::default()
-            .title("Confirm Deletion")
-            .borders(Borders::ALL);
-        let prompt = format!("Delete {} item(s)? (y/N)", items.len());
-        let paragraph = Paragraph::new(prompt)
-            .block(block)
-            .alignment(Alignment::Center);
-        f.render_widget(Clear, popup);
-        f.render_widget(paragraph, popup);
+    if let Mode::ConfirmDelete { items, kind } = &app.mode {
+        draw_delete_dialog(f, items, *kind);
     }
 
     if let Mode::Sort { selected } = &app.mode {
@@ -318,6 +310,37 @@ fn draw_preview(f: &mut Frame, area: Rect, preview: &mut Preview) {
 }
 
 /// Helper to create a centered rect using the given percentage width and height of the available rect
+/// Delete confirmation popup sized to its contents.
+fn draw_delete_dialog(f: &mut Frame, items: &[std::path::PathBuf], kind: DeleteKind) {
+    let area = f.area();
+    // Rows available inside the borders.
+    let max_lines = area.height.saturating_sub(2) as usize;
+    let lines = dialog_lines(items, kind, max_lines);
+    let content_w = lines.iter().map(|l| l.width()).max().unwrap_or(0) as u16;
+    let width = (content_w + 4).max(40).min(area.width);
+    let height = (lines.len() as u16 + 2).min(area.height);
+    let popup = Rect {
+        x: area.x + (area.width - width) / 2,
+        y: area.y + (area.height - height) / 2,
+        width,
+        height,
+    };
+    let border_style = match kind {
+        DeleteKind::Normal => Style::default(),
+        DeleteKind::Permanent => Style::default().fg(Color::Red),
+    };
+    let block = Block::default()
+        .title(dialog_title(kind))
+        .borders(Borders::ALL)
+        .border_style(border_style);
+    let text: Vec<Line> = lines
+        .into_iter()
+        .map(|l| Line::from(format!(" {l}")))
+        .collect();
+    f.render_widget(Clear, popup);
+    f.render_widget(Paragraph::new(text).block(block), popup);
+}
+
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
     let vertical_chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -337,4 +360,35 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
         ])
         .split(middle);
     horizontal_chunks[1]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::{backend::TestBackend, Terminal};
+    use std::path::PathBuf;
+
+    fn render(items: &[PathBuf], kind: DeleteKind, w: u16, h: u16) -> String {
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| draw_delete_dialog(f, items, kind)).unwrap();
+        let buf = term.backend().buffer();
+        (0..h)
+            .map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn delete_dialog_shows_names_and_fits_small_terminal() {
+        let items: Vec<PathBuf> = (0..25).map(|i| PathBuf::from(format!("/d/f{i}"))).collect();
+        let screen = render(&items, DeleteKind::Permanent, 60, 10);
+        assert!(screen.contains("Permanently delete 25 item(s)?"));
+        assert!(screen.contains("f0"));
+        assert!(screen.contains("more"));
+        assert!(screen.contains("(y/N)"));
+
+        let screen = render(&items[..2], DeleteKind::Normal, 80, 30);
+        assert!(screen.contains("Delete 2 item(s)?"));
+        assert!(screen.contains("f1"));
+    }
 }

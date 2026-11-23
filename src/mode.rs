@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use crate::delete_confirm::DeleteKind;
+
 #[derive(PartialEq)]
 pub enum PaneType {
     Left,
@@ -19,6 +21,7 @@ pub enum Mode {
     },
     ConfirmDelete {
         items: Vec<PathBuf>,
+        kind: DeleteKind,
     },
     /// Search mode: prompt for a query and jump to matching entries
     Search {
