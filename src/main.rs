@@ -1,5 +1,6 @@
 mod actions;
 mod app;
+mod command;
 mod delete_confirm;
 mod fs_utils;
 mod graphics;

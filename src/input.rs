@@ -1,366 +1,369 @@
+//! Key input: turns key presses into [`Command`]s.
+//!
+//! All key bindings live in this file: the per-mode tables below plus the
+//! few keys that need special handling in [`KeyState::translate`] (count
+//! prefix, `gg` / `G`, `q`, text input, dialogs).
+
 use crossterm::event::{self, Event, KeyCode};
 use ratatui::{backend::Backend, Terminal};
 use std::time::Duration;
-use std::{fs, io, io::Write, path::PathBuf};
+use std::{io, io::Write};
 
-use crate::actions::{copy_selection, delete_items, paste, resolve_paste_conflict, toggle_mark};
-use crate::app::{fs_error_message, App};
+use crate::app::App;
+use crate::command::Command;
 use crate::delete_confirm::{confirm_key, ConfirmAction, DeleteKind};
-use crate::fs_utils::{apply_sort, ensure_rename_target_free, find_match, SortBy, SORT_OPTIONS};
-use crate::media::open_external;
-use crate::mode::{Mode, PaneType};
+use crate::mode::Mode;
 use crate::paste::conflict_choice;
 
-/// Paths to act on: the marked entries (in list order), or the entry under
-/// the cursor when nothing is marked.
-fn target_paths(app: &App) -> Vec<PathBuf> {
-    let pane = app.current_pane();
-    if pane.marked.is_empty() {
-        return pane
-            .items
-            .get(pane.selected)
-            .map(|e| e.path())
-            .into_iter()
-            .collect();
-    }
-    let mut idx: Vec<usize> = pane.marked.iter().copied().collect();
-    idx.sort_unstable();
-    idx.iter()
-        .filter_map(|&i| pane.items.get(i).map(|e| e.path()))
-        .collect()
+type Bindings = &'static [(KeyCode, Command)];
+
+/// File list.
+const FILER_KEYS: Bindings = &[
+    (KeyCode::Char('j'), Command::MoveDown(1)),
+    (KeyCode::Char('k'), Command::MoveUp(1)),
+    (KeyCode::Char('h'), Command::MoveLeft),
+    (KeyCode::Char('l'), Command::MoveRight),
+    (KeyCode::Enter, Command::Open),
+    (KeyCode::Char('o'), Command::OpenExternal),
+    (KeyCode::Char('v'), Command::ToggleMark),
+    (KeyCode::Char('V'), Command::VisualStart),
+    (KeyCode::Char('y'), Command::Yank),
+    (KeyCode::Char('p'), Command::Paste),
+    (KeyCode::Char('x'), Command::Delete(DeleteKind::Normal)),
+    (KeyCode::Char('X'), Command::Delete(DeleteKind::Permanent)),
+    (KeyCode::Char('r'), Command::RenameStart),
+    (KeyCode::Char('/'), Command::SearchStart),
+    (KeyCode::Char('s'), Command::SortMenu),
+];
+
+/// Visual (range) selection.
+const VISUAL_KEYS: Bindings = &[
+    (KeyCode::Char('j'), Command::MoveDown(1)),
+    (KeyCode::Char('k'), Command::MoveUp(1)),
+    (KeyCode::Char('V'), Command::Back),
+    (KeyCode::Esc, Command::Back),
+];
+
+/// Text viewer.
+const VIEWER_KEYS: Bindings = &[
+    (KeyCode::Char('j'), Command::MoveDown(1)),
+    (KeyCode::Char('k'), Command::MoveUp(1)),
+    (KeyCode::Enter, Command::Back),
+];
+
+/// Image / video preview.
+const PREVIEW_KEYS: Bindings = &[
+    (KeyCode::Enter, Command::Back),
+    (KeyCode::Esc, Command::Back),
+    (KeyCode::Char('o'), Command::OpenExternal),
+];
+
+/// Sort menu.
+const SORT_KEYS: Bindings = &[
+    (KeyCode::Char('j'), Command::MoveDown(1)),
+    (KeyCode::Down, Command::MoveDown(1)),
+    (KeyCode::Char('k'), Command::MoveUp(1)),
+    (KeyCode::Up, Command::MoveUp(1)),
+    (KeyCode::Enter, Command::SortConfirm),
+    (KeyCode::Esc, Command::Back),
+];
+
+fn lookup(table: Bindings, code: KeyCode) -> Option<Command> {
+    table.iter().find(|(k, _)| *k == code).map(|&(_, cmd)| cmd)
 }
 
-/// Main event loop: handles input and dispatches actions.
+/// Key bindings of the current mode (after the global keys are handled).
+fn mode_command(mode: &Mode, code: KeyCode) -> Option<Command> {
+    match mode {
+        Mode::Filer => lookup(FILER_KEYS, code),
+        Mode::Visual { .. } => lookup(VISUAL_KEYS, code),
+        Mode::Viewer { .. } => lookup(VIEWER_KEYS, code),
+        Mode::Preview => lookup(PREVIEW_KEYS, code),
+        Mode::Sort { .. } => lookup(SORT_KEYS, code),
+        Mode::Search { .. } => Some(match code {
+            KeyCode::Char(c) => Command::InsertChar(c),
+            KeyCode::Backspace => Command::DeleteChar,
+            KeyCode::Enter => Command::SearchConfirm,
+            KeyCode::Esc => Command::Back,
+            // Any other key searches again from the cursor.
+            _ => Command::SearchNext,
+        }),
+        Mode::Rename { .. } => match code {
+            KeyCode::Char(c) => Some(Command::InsertChar(c)),
+            KeyCode::Backspace => Some(Command::DeleteChar),
+            KeyCode::Enter => Some(Command::RenameCommit),
+            KeyCode::Esc => Some(Command::Back),
+            _ => None,
+        },
+        Mode::ConfirmDelete { .. } => match confirm_key(code) {
+            ConfirmAction::Delete => Some(Command::ConfirmDelete),
+            ConfirmAction::Cancel => Some(Command::Back),
+            ConfirmAction::Ignore => None,
+        },
+        Mode::PasteConflict { .. } => conflict_choice(code).map(Command::ResolvePaste),
+    }
+}
+
+/// Keys typed so far that are waiting for the rest of a sequence.
+#[derive(Default)]
+pub struct KeyState {
+    /// Numeric count prefix (`5j`); 0 = none.
+    prefix: usize,
+    /// The previous key was `g` (first half of `gg`).
+    last_key_g: bool,
+}
+
+impl KeyState {
+    /// Turn a key press in the given mode into a command, if it completes one.
+    pub fn translate(&mut self, mode: &Mode, code: KeyCode) -> Option<Command> {
+        // Text-input modes must receive every character (including 'q', 'g', 'G').
+        let text_input = matches!(mode, Mode::Search { .. } | Mode::Rename { .. });
+        // In dialogs 'q' never quits (the delete dialog treats it as cancel).
+        let in_dialog = matches!(
+            mode,
+            Mode::ConfirmDelete { .. } | Mode::PasteConflict { .. }
+        );
+        if code == KeyCode::Char('q') && !text_input && !in_dialog {
+            return Some(Command::Quit);
+        }
+
+        if let KeyCode::Char(c) = code {
+            if matches!(mode, Mode::Filer | Mode::Viewer { .. }) && c.is_ascii_digit() {
+                self.prefix = self
+                    .prefix
+                    .saturating_mul(10)
+                    .saturating_add(c.to_digit(10).unwrap() as usize);
+                return None;
+            }
+        }
+        let count = if self.prefix > 0 { self.prefix } else { 1 };
+        self.prefix = 0;
+
+        // Vim-style 'gg' (go to top) and 'G' (go to bottom), in every
+        // non-text mode (they only have an effect in the list and viewer).
+        if let (KeyCode::Char(c), false) = (code, text_input) {
+            match c {
+                'g' => {
+                    if self.last_key_g {
+                        self.last_key_g = false;
+                        return Some(Command::GoTop);
+                    }
+                    self.last_key_g = true;
+                    return None;
+                }
+                'G' => {
+                    self.last_key_g = false;
+                    return Some(Command::GoBottom);
+                }
+                _ => self.last_key_g = false,
+            }
+        }
+
+        mode_command(mode, code).map(|cmd| cmd.with_count(count))
+    }
+}
+
+/// Main event loop: draw, read a key, translate it and apply the command.
 pub fn run_app<B: Backend<Error = io::Error> + Write>(
     terminal: &mut Terminal<B>,
     app: &mut App,
 ) -> io::Result<()> {
-    let mut prefix: usize = 0;
-    let mut last_key_g = false;
+    let mut keys = KeyState::default();
     loop {
         terminal.draw(|f| crate::ui::ui(f, app))?;
         if event::poll(Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
                 // A status message stays until the next key press.
                 app.message = None;
-                // Text-input modes must receive every character (including 'q', 'g', 'G').
-                let text_input = matches!(app.mode, Mode::Search { .. } | Mode::Rename { .. });
-                // In dialogs 'q' never quits (the delete dialog treats it as cancel).
-                let in_dialog = matches!(
-                    app.mode,
-                    Mode::ConfirmDelete { .. } | Mode::PasteConflict { .. }
-                );
-                if key.code == KeyCode::Char('q') && !text_input && !in_dialog {
-                    return Ok(());
-                }
-                let mut rename_target: Option<String> = None;
-                let mut sort_choice: Option<SortBy> = None;
-
-                if let KeyCode::Char(c) = key.code {
-                    if (matches!(app.mode, Mode::Filer) || matches!(app.mode, Mode::Viewer { .. }))
-                        && c.is_ascii_digit()
-                    {
-                        prefix = prefix
-                            .saturating_mul(10)
-                            .saturating_add(c.to_digit(10).unwrap() as usize);
-                        continue;
+                if let Some(cmd) = keys.translate(&app.mode, key.code) {
+                    if app.apply(cmd).is_break() {
+                        return Ok(());
                     }
-                }
-                let count = if prefix > 0 { prefix } else { 1 };
-                prefix = 0;
-
-                // Vim-style 'gg' (go to top) and 'G' (go to bottom)
-                if let (KeyCode::Char(c), false) = (key.code, text_input) {
-                    match c {
-                        'g' => {
-                            if last_key_g {
-                                last_key_g = false;
-                                match &mut app.mode {
-                                    Mode::Filer => app.current_pane_mut().selected = 0,
-                                    Mode::Viewer { offset, .. } => *offset = 0,
-                                    _ => {}
-                                }
-                            } else {
-                                last_key_g = true;
-                            }
-                            continue;
-                        }
-                        'G' => {
-                            last_key_g = false;
-                            match &mut app.mode {
-                                Mode::Filer => {
-                                    let pane = app.current_pane_mut();
-                                    pane.selected = pane.items.len().saturating_sub(1);
-                                }
-                                Mode::Viewer {
-                                    offset, content, ..
-                                } => {
-                                    let total = content.lines().count();
-                                    *offset = total.saturating_sub(1) as u16;
-                                }
-                                _ => {}
-                            }
-                            continue;
-                        }
-                        _ => last_key_g = false,
-                    }
-                }
-
-                // Visual selection mode
-                if let Mode::Visual { anchor } = app.mode {
-                    match key.code {
-                        KeyCode::Char('j') => {
-                            for _ in 0..count {
-                                app.on_down();
-                            }
-                            let pane = app.current_pane_mut();
-                            pane.marked.clear();
-                            let end = pane.selected;
-                            let (lo, hi) = if anchor <= end {
-                                (anchor, end)
-                            } else {
-                                (end, anchor)
-                            };
-                            for i in lo..=hi {
-                                pane.marked.insert(i);
-                            }
-                        }
-                        KeyCode::Char('k') => {
-                            for _ in 0..count {
-                                app.on_up();
-                            }
-                            let pane = app.current_pane_mut();
-                            pane.marked.clear();
-                            let end = pane.selected;
-                            let (lo, hi) = if anchor <= end {
-                                (anchor, end)
-                            } else {
-                                (end, anchor)
-                            };
-                            for i in lo..=hi {
-                                pane.marked.insert(i);
-                            }
-                        }
-                        KeyCode::Char('V') | KeyCode::Esc => {
-                            app.mode = Mode::Filer;
-                        }
-                        _ => {}
-                    }
-                    continue;
-                }
-
-                // Search mode: edit query and jump to matching entries
-                if let Mode::Search { query } = &mut app.mode {
-                    match key.code {
-                        KeyCode::Char(c) => query.push(c),
-                        KeyCode::Backspace => {
-                            query.pop();
-                        }
-                        KeyCode::Enter | KeyCode::Esc => {
-                            app.mode = Mode::Filer;
-                        }
-                        _ => {}
-                    }
-                }
-                let q_opt = if let Mode::Search { query } = &app.mode {
-                    Some(query.clone())
-                } else {
-                    None
-                };
-                if let Some(q) = q_opt {
-                    let pane = app.current_pane_mut();
-                    if let Some(idx) = find_match(&pane.items, &q, pane.selected) {
-                        pane.selected = idx;
-                    }
-                    continue;
-                }
-
-                // Rename mode
-                if let Mode::Rename { buffer, .. } = &mut app.mode {
-                    match key.code {
-                        KeyCode::Char(c) => buffer.push(c),
-                        KeyCode::Backspace => {
-                            buffer.pop();
-                        }
-                        KeyCode::Enter => {
-                            rename_target = Some(buffer.clone());
-                            app.mode = Mode::Filer;
-                        }
-                        KeyCode::Esc => {
-                            app.mode = Mode::Filer;
-                        }
-                        _ => {}
-                    }
-                }
-
-                // Sort mode
-                if let Mode::Sort { selected } = &mut app.mode {
-                    match key.code {
-                        KeyCode::Down | KeyCode::Char('j') => {
-                            *selected = (*selected + 1) % SORT_OPTIONS.len();
-                        }
-                        KeyCode::Up | KeyCode::Char('k') => {
-                            *selected = (*selected + SORT_OPTIONS.len() - 1) % SORT_OPTIONS.len();
-                        }
-                        KeyCode::Enter => {
-                            let by = match *selected {
-                                0 => SortBy::Modified,
-                                1 => SortBy::Created,
-                                2 => SortBy::Size,
-                                _ => SortBy::Name,
-                            };
-                            sort_choice = Some(by);
-                            app.mode = Mode::Filer;
-                        }
-                        KeyCode::Esc => {
-                            app.mode = Mode::Filer;
-                        }
-                        _ => {}
-                    }
-                }
-
-                // Commit rename
-                if let Some(new_name) = rename_target {
-                    let pane = app.current_pane_mut();
-                    let old = pane.items[pane.selected].path();
-                    let newp = old.with_file_name(&new_name);
-                    // Unix `rename` silently replaces an existing entry; refuse instead.
-                    let result = ensure_rename_target_free(&old, &newp)
-                        .map_err(|e| (e, newp.clone()))
-                        .and_then(|()| fs::rename(&old, &newp).map_err(|e| (e, old.clone())));
-                    if pane.refresh().is_ok() {
-                        if let Some(pos) = pane
-                            .items
-                            .iter()
-                            .position(|e| e.file_name().to_string_lossy() == new_name)
-                        {
-                            pane.selected = pos;
-                        }
-                    }
-                    match result {
-                        Ok(()) => app.notify_info(format!("Renamed to {new_name}")),
-                        Err((e, path)) => app.notify_error(fs_error_message(&e, &path)),
-                    }
-                    continue;
-                }
-
-                // Commit sort
-                if let Some(by) = sort_choice {
-                    apply_sort(app.current_pane_mut(), by);
-                    continue;
-                }
-
-                // Paste collision dialog
-                if matches!(app.mode, Mode::PasteConflict { .. }) {
-                    if let Some(choice) = conflict_choice(key.code) {
-                        resolve_paste_conflict(app, choice);
-                    }
-                    continue;
-                }
-
-                match &mut app.mode {
-                    Mode::ConfirmDelete { items, .. } => match confirm_key(key.code) {
-                        ConfirmAction::Delete => {
-                            let to_delete = std::mem::take(items);
-                            app.mode = Mode::Filer;
-                            delete_items(app, &to_delete);
-                        }
-                        ConfirmAction::Cancel => {
-                            app.mode = Mode::Filer;
-                            app.notify_info("Delete cancelled");
-                        }
-                        ConfirmAction::Ignore => {}
-                    },
-                    Mode::Viewer { offset, .. } => match key.code {
-                        KeyCode::Char('j') => *offset = offset.saturating_add(count as u16),
-                        KeyCode::Char('k') => *offset = offset.saturating_sub(count as u16),
-                        KeyCode::Enter => app.mode = Mode::Filer,
-                        _ => {}
-                    },
-                    Mode::Preview => match key.code {
-                        KeyCode::Enter | KeyCode::Esc => app.close_preview(),
-                        KeyCode::Char('o') => {
-                            if let Some(p) = app.selected_path() {
-                                if let Err(e) = open_external(&p) {
-                                    app.notify_error(fs_error_message(&e, &p));
-                                }
-                            }
-                        }
-                        _ => {}
-                    },
-                    Mode::Filer => match key.code {
-                        KeyCode::Char('j') => (0..count).for_each(|_| app.on_down()),
-                        KeyCode::Char('k') => (0..count).for_each(|_| app.on_up()),
-                        KeyCode::Char(c @ ('x' | 'X')) => {
-                            let items = target_paths(app);
-                            if !items.is_empty() {
-                                let kind = if c == 'X' {
-                                    DeleteKind::Permanent
-                                } else {
-                                    DeleteKind::Normal
-                                };
-                                app.mode = Mode::ConfirmDelete { items, kind };
-                            }
-                        }
-                        KeyCode::Enter => {
-                            let previewed =
-                                app.selected_path().is_some_and(|p| app.open_preview(&p));
-                            if !previewed {
-                                app.on_enter();
-                            }
-                        }
-                        KeyCode::Char('o') => {
-                            if let Some(p) = app.selected_path() {
-                                if let Err(e) = open_external(&p) {
-                                    app.notify_error(fs_error_message(&e, &p));
-                                }
-                            }
-                        }
-                        KeyCode::Char('h') => match app.active {
-                            PaneType::Left => app.on_left(),
-                            PaneType::Right => app.switch_pane(),
-                        },
-                        KeyCode::Char('l') => match app.active {
-                            PaneType::Left => app.switch_pane(),
-                            PaneType::Right => app.on_left(),
-                        },
-                        KeyCode::Char('V') => {
-                            let pane = app.current_pane_mut();
-                            let anchor = pane.selected;
-                            pane.marked.clear();
-                            pane.marked.insert(anchor);
-                            app.mode = Mode::Visual { anchor };
-                        }
-                        KeyCode::Char('/') => {
-                            app.mode = Mode::Search {
-                                query: String::new(),
-                            };
-                        }
-                        KeyCode::Char('r') => {
-                            let pane = app.current_pane_mut();
-                            if let Some(entry) = pane.items.get(pane.selected) {
-                                let name = entry.file_name().to_string_lossy().into_owned();
-                                app.mode = Mode::Rename {
-                                    original: name.clone(),
-                                    buffer: name,
-                                };
-                            }
-                        }
-                        KeyCode::Char('s') => {
-                            app.mode = Mode::Sort { selected: 0 };
-                        }
-                        KeyCode::Char('v') => {
-                            toggle_mark(app.current_pane_mut());
-                        }
-                        KeyCode::Char('y') => {
-                            copy_selection(app);
-                        }
-                        KeyCode::Char('p') => paste(app),
-                        _ => {}
-                    },
-                    _ => {}
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::delete_confirm::DeleteKind;
+    use crate::paste::{ConflictChoice, Resolution};
+    use std::path::PathBuf;
+
+    fn ch(c: char) -> KeyCode {
+        KeyCode::Char(c)
+    }
+
+    /// Translate a key sequence in a fixed mode, collecting the commands.
+    fn run(mode: &Mode, keys: &[KeyCode]) -> Vec<Command> {
+        let mut st = KeyState::default();
+        keys.iter().filter_map(|&k| st.translate(mode, k)).collect()
+    }
+
+    fn search() -> Mode {
+        Mode::Search {
+            query: String::new(),
+        }
+    }
+
+    fn rename() -> Mode {
+        Mode::Rename {
+            original: "a".into(),
+            buffer: "a".into(),
+        }
+    }
+
+    fn confirm() -> Mode {
+        Mode::ConfirmDelete {
+            items: vec![PathBuf::from("/x")],
+            kind: DeleteKind::Normal,
+        }
+    }
+
+    fn viewer() -> Mode {
+        Mode::Viewer {
+            content: String::new(),
+            title: String::new(),
+            offset: 0,
+        }
+    }
+
+    #[test]
+    fn filer_keys() {
+        let f = Mode::Filer;
+        assert_eq!(run(&f, &[ch('j')]), [Command::MoveDown(1)]);
+        assert_eq!(run(&f, &[ch('h')]), [Command::MoveLeft]);
+        assert_eq!(run(&f, &[KeyCode::Enter]), [Command::Open]);
+        assert_eq!(
+            run(&f, &[ch('X')]),
+            [Command::Delete(DeleteKind::Permanent)]
+        );
+        assert_eq!(run(&f, &[ch('p')]), [Command::Paste]);
+        assert_eq!(run(&f, &[ch('z')]), []);
+        assert_eq!(run(&f, &[KeyCode::Down]), []);
+    }
+
+    #[test]
+    fn count_prefix_applies_to_movement_only() {
+        let f = Mode::Filer;
+        assert_eq!(
+            run(&f, &[ch('1'), ch('2'), ch('j')]),
+            [Command::MoveDown(12)]
+        );
+        assert_eq!(
+            run(&f, &[ch('3'), ch('k'), ch('k')]),
+            [Command::MoveUp(3), Command::MoveUp(1)]
+        );
+        assert_eq!(run(&f, &[ch('3'), ch('y')]), [Command::Yank]);
+        assert_eq!(run(&viewer(), &[ch('4'), ch('j')]), [Command::MoveDown(4)]);
+    }
+
+    #[test]
+    fn digits_are_not_a_count_outside_filer_and_viewer() {
+        let visual = Mode::Visual { anchor: 0 };
+        assert_eq!(run(&visual, &[ch('5'), ch('j')]), [Command::MoveDown(1)]);
+        assert_eq!(run(&search(), &[ch('5')]), [Command::InsertChar('5')]);
+    }
+
+    #[test]
+    fn gg_and_g() {
+        let f = Mode::Filer;
+        assert_eq!(run(&f, &[ch('g'), ch('g')]), [Command::GoTop]);
+        assert_eq!(run(&f, &[ch('G')]), [Command::GoBottom]);
+        assert_eq!(run(&f, &[ch('5'), ch('g'), ch('g')]), [Command::GoTop]);
+        // Another character key breaks the sequence ...
+        assert_eq!(run(&f, &[ch('g'), ch('v'), ch('g')]), [Command::ToggleMark]);
+        // ... but non-character keys and digits do not.
+        assert_eq!(
+            run(&f, &[ch('g'), KeyCode::Down, ch('g')]),
+            [Command::GoTop]
+        );
+        assert_eq!(run(&f, &[ch('g'), ch('3'), ch('g')]), [Command::GoTop]);
+        // g / G are swallowed in dialogs and menus too.
+        assert_eq!(run(&confirm(), &[ch('G')]), [Command::GoBottom]);
+        assert_eq!(run(&Mode::Sort { selected: 0 }, &[ch('g')]), []);
+    }
+
+    #[test]
+    fn q_quits_except_in_text_input_and_dialogs() {
+        for mode in [
+            Mode::Filer,
+            Mode::Visual { anchor: 0 },
+            viewer(),
+            Mode::Preview,
+            Mode::Sort { selected: 0 },
+        ] {
+            assert_eq!(run(&mode, &[ch('q')]), [Command::Quit]);
+        }
+        assert_eq!(run(&search(), &[ch('q')]), [Command::InsertChar('q')]);
+        assert_eq!(run(&rename(), &[ch('q')]), [Command::InsertChar('q')]);
+        assert_eq!(run(&confirm(), &[ch('q')]), [Command::Back]);
+    }
+
+    #[test]
+    fn text_input_keys() {
+        let s = search();
+        assert_eq!(
+            run(&s, &[ch('g'), ch('G')]),
+            [Command::InsertChar('g'), Command::InsertChar('G')]
+        );
+        assert_eq!(run(&s, &[KeyCode::Backspace]), [Command::DeleteChar]);
+        assert_eq!(run(&s, &[KeyCode::Enter]), [Command::SearchConfirm]);
+        assert_eq!(run(&s, &[KeyCode::Esc]), [Command::Back]);
+        assert_eq!(run(&s, &[KeyCode::Left]), [Command::SearchNext]);
+
+        let r = rename();
+        assert_eq!(run(&r, &[KeyCode::Enter]), [Command::RenameCommit]);
+        assert_eq!(run(&r, &[KeyCode::Esc]), [Command::Back]);
+        assert_eq!(run(&r, &[KeyCode::Left]), []);
+    }
+
+    #[test]
+    fn visual_swallows_other_keys() {
+        let v = Mode::Visual { anchor: 0 };
+        assert_eq!(run(&v, &[ch('x'), KeyCode::Enter, ch('y')]), []);
+        assert_eq!(run(&v, &[ch('V')]), [Command::Back]);
+        assert_eq!(run(&v, &[KeyCode::Esc]), [Command::Back]);
+    }
+
+    #[test]
+    fn viewer_preview_and_sort_keys() {
+        assert_eq!(run(&viewer(), &[KeyCode::Enter]), [Command::Back]);
+        assert_eq!(run(&viewer(), &[KeyCode::Esc]), []);
+        assert_eq!(run(&Mode::Preview, &[KeyCode::Esc]), [Command::Back]);
+        assert_eq!(run(&Mode::Preview, &[ch('o')]), [Command::OpenExternal]);
+        let s = Mode::Sort { selected: 0 };
+        assert_eq!(run(&s, &[KeyCode::Down]), [Command::MoveDown(1)]);
+        assert_eq!(run(&s, &[ch('k')]), [Command::MoveUp(1)]);
+        assert_eq!(run(&s, &[KeyCode::Enter]), [Command::SortConfirm]);
+    }
+
+    #[test]
+    fn dialogs_use_their_own_key_functions() {
+        let c = confirm();
+        assert_eq!(run(&c, &[ch('y')]), [Command::ConfirmDelete]);
+        assert_eq!(run(&c, &[KeyCode::Enter]), [Command::Back]);
+        assert_eq!(run(&c, &[ch('j')]), []);
+
+        let p = Mode::PasteConflict {
+            pending: crate::paste::PendingPaste {
+                planner: crate::paste::Planner::new(vec![], PathBuf::from("/")),
+                failures: vec![],
+            },
+        };
+        assert_eq!(run(&p, &[ch('q')]), []);
+        assert_eq!(
+            run(&p, &[ch('O')]),
+            [Command::ResolvePaste(ConflictChoice::Resolve(
+                Resolution::Overwrite,
+                true
+            ))]
+        );
+        assert_eq!(
+            run(&p, &[KeyCode::Esc]),
+            [Command::ResolvePaste(ConflictChoice::Cancel)]
+        );
     }
 }
