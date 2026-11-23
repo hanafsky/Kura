@@ -187,7 +187,7 @@ pub fn copy_entry(src: &Path, dst: &Path) -> io::Result<()> {
         if canonicalize_lenient(src)? == canonicalize_lenient(dst)? {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("cannot copy {} onto itself", src.display()),
+                "cannot copy a file onto itself",
             ));
         }
         fs::copy(src, dst).map(|_| ())
@@ -209,11 +209,7 @@ pub fn copy_dir_recursively(src: &Path, dst: &Path) -> io::Result<()> {
     if dst_abs.starts_with(&src_abs) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!(
-                "cannot copy directory {} into itself ({})",
-                src.display(),
-                dst.display()
-            ),
+            "cannot copy a folder into itself",
         ));
     }
     copy_dir_inner(src, dst)
@@ -235,6 +231,25 @@ fn copy_dir_inner(src: &Path, dst: &Path) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Check that renaming `old` to `new` would not replace another entry.
+/// Unix `rename` silently replaces an existing file, so a taken name is
+/// refused. The same entry under another spelling (e.g. a case-only change
+/// on a case-insensitive filesystem) is allowed.
+pub fn ensure_rename_target_free(old: &Path, new: &Path) -> io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(new_meta) = fs::symlink_metadata(new) else {
+        return Ok(());
+    };
+    let old_meta = fs::symlink_metadata(old)?;
+    if old_meta.dev() == new_meta.dev() && old_meta.ino() == new_meta.ino() {
+        return Ok(());
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "already exists",
+    ))
 }
 
 #[cfg(test)]
@@ -402,5 +417,42 @@ mod tests {
         copy_entry(&link, &dst).unwrap();
         assert!(fs::symlink_metadata(&dst).unwrap().file_type().is_symlink());
         assert_eq!(fs::read_link(&dst).unwrap(), dir);
+    }
+
+    #[test]
+    fn rename_onto_existing_name_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let a = tmp.path().join("a.txt");
+        let b = tmp.path().join("b.txt");
+        fs::write(&a, "a").unwrap();
+        fs::write(&b, "b").unwrap();
+        let err = ensure_rename_target_free(&a, &b).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        assert!(ensure_rename_target_free(&a, &tmp.path().join("c.txt")).is_ok());
+        // Renaming to its own name is not a collision.
+        assert!(ensure_rename_target_free(&a, &a).is_ok());
+    }
+
+    #[test]
+    fn rename_onto_existing_dangling_symlink_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let a = tmp.path().join("a");
+        fs::write(&a, "a").unwrap();
+        let link = tmp.path().join("link");
+        symlink(tmp.path().join("missing"), &link).unwrap();
+        assert!(ensure_rename_target_free(&a, &link).is_err());
+    }
+
+    #[test]
+    fn copy_into_itself_errors_do_not_contain_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path().join("dir");
+        fs::create_dir_all(d.join("sub")).unwrap();
+        let err = copy_dir_recursively(&d, &d.join("sub/dir")).unwrap_err();
+        assert_eq!(err.to_string(), "cannot copy a folder into itself");
+        let f = tmp.path().join("f");
+        fs::write(&f, "x").unwrap();
+        let err = copy_entry(&f, &f).unwrap_err();
+        assert_eq!(err.to_string(), "cannot copy a file onto itself");
     }
 }

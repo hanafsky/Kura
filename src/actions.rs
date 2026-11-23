@@ -1,9 +1,9 @@
 use std::fs;
-use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::app::{fs_error_message, App, Pane};
-use crate::fs_utils::{copy_entry, is_same_location, paste_destination};
+use crate::mode::Mode;
+use crate::paste::{execute, prepare, ConflictChoice, PendingPaste, Planner};
 
 /// Toggle mark on the selected entry in the given pane.
 pub fn toggle_mark(pane: &mut Pane) {
@@ -39,30 +39,57 @@ pub fn copy_selection(app: &mut App) {
 /// Paste clipboard entries into the current directory.
 ///
 /// Pasting onto the entry's own location creates `name (copy).ext` instead of
-/// truncating the source. Every item is attempted; the first error is returned.
-pub fn paste(app: &mut App) -> io::Result<()> {
-    let items = app.clipboard.clone();
-    let dst_dir = app.current_pane_mut().current_dir.clone();
-    let mut first_err = None;
-    for src in &items {
-        if let Err(e) = paste_one(src, &dst_dir) {
-            first_err.get_or_insert(e);
+/// truncating the source. If an entry pasted from elsewhere collides with an
+/// existing name, the collision dialog (`Mode::PasteConflict`) is opened and
+/// nothing is copied until every collision is answered.
+pub fn paste(app: &mut App) {
+    let dst_dir = app.current_pane().current_dir.clone();
+    let mut items = Vec::new();
+    let mut failures = Vec::new();
+    for src in &app.clipboard {
+        match prepare(src, &dst_dir) {
+            Ok(Some(item)) => items.push(item),
+            Ok(None) => {}
+            Err(e) => failures.push((src.clone(), e)),
         }
     }
-    let _ = app.current_pane_mut().refresh();
-    first_err.map_or(Ok(()), Err)
+    let pending = PendingPaste {
+        planner: Planner::new(items, dst_dir),
+        failures,
+    };
+    continue_paste(app, pending);
 }
 
-fn paste_one(src: &Path, dst_dir: &Path) -> io::Result<()> {
-    let Some(file_name) = src.file_name() else {
-        return Ok(());
+/// Answer the current collision of the paste waiting in the dialog.
+pub fn resolve_paste_conflict(app: &mut App, choice: ConflictChoice) {
+    let Mode::PasteConflict { mut pending } = std::mem::replace(&mut app.mode, Mode::Filer) else {
+        return;
     };
-    let is_dir = fs::symlink_metadata(src)?.is_dir();
-    let same = is_same_location(src, dst_dir)?;
-    let dst = paste_destination(file_name, dst_dir, is_dir, same, |p| {
-        fs::symlink_metadata(p).is_ok()
-    });
-    copy_entry(src, &dst)
+    match choice {
+        ConflictChoice::Cancel => app.notify_info("Paste cancelled"),
+        ConflictChoice::Resolve(res, all) => {
+            pending.planner.resolve(res, all, &exists_no_follow);
+            continue_paste(app, pending);
+        }
+    }
+}
+
+fn exists_no_follow(p: &Path) -> bool {
+    fs::symlink_metadata(p).is_ok()
+}
+
+/// Plan until the next collision (then show the dialog) or run the plan.
+fn continue_paste(app: &mut App, mut pending: PendingPaste) {
+    if pending.planner.next_conflict(&exists_no_follow).is_some() {
+        app.mode = Mode::PasteConflict { pending };
+        return;
+    }
+    let report = execute(pending.planner.into_steps(), pending.failures);
+    let _ = app.current_pane_mut().refresh();
+    match report.message() {
+        (true, text) => app.notify_info(text),
+        (false, text) => app.notify_error(text),
+    }
 }
 
 /// Delete the given files or directories from disk and refresh the pane.
@@ -94,6 +121,18 @@ pub fn delete_items(app: &mut App, items: &[PathBuf]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Paste a single entry the way `paste` does when there is no collision.
+    fn paste_one(src: &Path, dst_dir: &Path) -> std::io::Result<()> {
+        let item = prepare(src, dst_dir)?.expect("has a file name");
+        let mut planner = Planner::new(vec![item], dst_dir.to_path_buf());
+        assert!(planner.next_conflict(&exists_no_follow).is_none());
+        let mut report = execute(planner.into_steps(), vec![]);
+        match report.failures.pop() {
+            Some((_, e)) => Err(e),
+            None => Ok(()),
+        }
+    }
 
     #[test]
     fn paste_into_same_dir_creates_numbered_copies() {
@@ -141,7 +180,7 @@ mod tests {
         let d = tmp.path().join("dir");
         fs::create_dir_all(d.join("sub")).unwrap();
         let err = paste_one(&d, &d.join("sub")).unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
         assert!(!d.join("sub/dir").exists());
     }
 }
