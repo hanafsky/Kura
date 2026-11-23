@@ -5,9 +5,29 @@ use std::{fs, io, io::Write, path::PathBuf};
 
 use crate::actions::{copy_selection, delete_items, paste, toggle_mark};
 use crate::app::{fs_error_message, App};
+use crate::delete_confirm::{confirm_key, ConfirmAction, DeleteKind};
 use crate::fs_utils::{apply_sort, find_match, SortBy, SORT_OPTIONS};
 use crate::media::open_external;
 use crate::mode::{Mode, PaneType};
+
+/// Paths to act on: the marked entries (in list order), or the entry under
+/// the cursor when nothing is marked.
+fn target_paths(app: &App) -> Vec<PathBuf> {
+    let pane = app.current_pane();
+    if pane.marked.is_empty() {
+        return pane
+            .items
+            .get(pane.selected)
+            .map(|e| e.path())
+            .into_iter()
+            .collect();
+    }
+    let mut idx: Vec<usize> = pane.marked.iter().copied().collect();
+    idx.sort_unstable();
+    idx.iter()
+        .filter_map(|&i| pane.items.get(i).map(|e| e.path()))
+        .collect()
+}
 
 /// Main event loop: handles input and dispatches actions.
 pub fn run_app<B: Backend<Error = io::Error> + Write>(
@@ -24,7 +44,9 @@ pub fn run_app<B: Backend<Error = io::Error> + Write>(
                 app.message = None;
                 // Text-input modes must receive every character (including 'q', 'g', 'G').
                 let text_input = matches!(app.mode, Mode::Search { .. } | Mode::Rename { .. });
-                if key.code == KeyCode::Char('q') && !text_input {
+                // In the delete dialog 'q' cancels instead of quitting.
+                let in_dialog = matches!(app.mode, Mode::ConfirmDelete { .. });
+                if key.code == KeyCode::Char('q') && !text_input && !in_dialog {
                     return Ok(());
                 }
                 let mut rename_target: Option<String> = None;
@@ -222,16 +244,17 @@ pub fn run_app<B: Backend<Error = io::Error> + Write>(
                 }
 
                 match &mut app.mode {
-                    Mode::ConfirmDelete { items } => match key.code {
-                        KeyCode::Char('y') | KeyCode::Enter => {
-                            let to_delete = items.clone();
+                    Mode::ConfirmDelete { items, .. } => match confirm_key(key.code) {
+                        ConfirmAction::Delete => {
+                            let to_delete = std::mem::take(items);
                             app.mode = Mode::Filer;
                             delete_items(app, &to_delete);
                         }
-                        KeyCode::Char('n') | KeyCode::Esc => {
+                        ConfirmAction::Cancel => {
                             app.mode = Mode::Filer;
+                            app.notify_info("Delete cancelled");
                         }
-                        _ => {}
+                        ConfirmAction::Ignore => {}
                     },
                     Mode::Viewer { offset, .. } => match key.code {
                         KeyCode::Char('j') => *offset = offset.saturating_add(count as u16),
@@ -253,39 +276,16 @@ pub fn run_app<B: Backend<Error = io::Error> + Write>(
                     Mode::Filer => match key.code {
                         KeyCode::Char('j') => (0..count).for_each(|_| app.on_down()),
                         KeyCode::Char('k') => (0..count).for_each(|_| app.on_up()),
-                        KeyCode::Char('x') => {
-                            let items: Vec<PathBuf> = {
-                                let pane = app.current_pane_mut();
-                                let mut sel = Vec::new();
-                                if !pane.marked.is_empty() {
-                                    for &i in &pane.marked {
-                                        if let Some(e) = pane.items.get(i) {
-                                            sel.push(e.path());
-                                        }
-                                    }
-                                } else if let Some(e) = pane.items.get(pane.selected) {
-                                    sel.push(e.path());
-                                }
-                                sel
-                            };
-                            app.mode = Mode::ConfirmDelete { items };
-                        }
-                        KeyCode::Char('X') => {
-                            let items: Vec<PathBuf> = {
-                                let pane = app.current_pane_mut();
-                                let mut sel = Vec::new();
-                                if !pane.marked.is_empty() {
-                                    for &i in &pane.marked {
-                                        if let Some(e) = pane.items.get(i) {
-                                            sel.push(e.path());
-                                        }
-                                    }
-                                } else if let Some(e) = pane.items.get(pane.selected) {
-                                    sel.push(e.path());
-                                }
-                                sel
-                            };
-                            delete_items(app, &items);
+                        KeyCode::Char(c @ ('x' | 'X')) => {
+                            let items = target_paths(app);
+                            if !items.is_empty() {
+                                let kind = if c == 'X' {
+                                    DeleteKind::Permanent
+                                } else {
+                                    DeleteKind::Normal
+                                };
+                                app.mode = Mode::ConfirmDelete { items, kind };
+                            }
                         }
                         KeyCode::Enter => {
                             let previewed =
