@@ -19,7 +19,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-latest]
+        # PRs run Linux only: hosted macOS arm64 runners are often
+        # capacity-constrained. macOS still runs on pushes to main and in
+        # the release workflow.
+        os: ${{ github.event_name == 'pull_request' && fromJSON('["ubuntu-24.04"]') || fromJSON('["ubuntu-24.04", "macos-latest"]') }}
     steps:
       - uses: actions/checkout@v7
 
