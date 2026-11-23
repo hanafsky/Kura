@@ -8,6 +8,7 @@ use std::{
 };
 
 /// Criteria for sorting the file list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SortBy {
     Modified,
     Created,
@@ -16,17 +17,27 @@ pub enum SortBy {
 }
 
 /// Labels for sort options in the popup.
-pub static SORT_OPTIONS: &[&str] = &[
+pub const SORT_OPTIONS: &[&str] = &[
     "Last modified date",
     "Creation date",
     "File size",
     "Alphabetical",
 ];
 
-/// Apply the chosen sort order to the given pane.
-pub fn apply_sort(pane: &mut crate::app::Pane, by: SortBy) {
-    match by {
-        SortBy::Modified => pane.items.sort_by(|a, b| {
+/// Rows of the sort popup: the sort options plus the "Directories first" toggle.
+pub const SORT_MENU_ROWS: usize = SORT_OPTIONS.len() + 1;
+
+/// Row of the "Directories first" toggle in the sort popup.
+pub const DIRS_FIRST_ROW: usize = SORT_OPTIONS.len();
+
+/// Order a directory listing. Entries are first ordered by name (byte
+/// order, the default listing), then stably by `sort`, then directories
+/// are moved before files if `dirs_first` is set.
+pub fn sort_entries(items: &mut [DirEntry], sort: Option<SortBy>, dirs_first: bool) {
+    items.sort_by_key(|e| e.file_name());
+    match sort {
+        None => {}
+        Some(SortBy::Modified) => items.sort_by(|a, b| {
             let ma = a
                 .metadata()
                 .and_then(|m| m.modified())
@@ -37,20 +48,27 @@ pub fn apply_sort(pane: &mut crate::app::Pane, by: SortBy) {
                 .unwrap_or(UNIX_EPOCH);
             ma.cmp(&mb)
         }),
-        SortBy::Created => pane.items.sort_by(|a, b| {
+        Some(SortBy::Created) => items.sort_by(|a, b| {
             let ca = a.metadata().and_then(|m| m.created()).unwrap_or(UNIX_EPOCH);
             let cb = b.metadata().and_then(|m| m.created()).unwrap_or(UNIX_EPOCH);
             ca.cmp(&cb)
         }),
-        SortBy::Size => pane
-            .items
-            .sort_by_key(|e| Reverse(e.metadata().map(|m| m.len()).unwrap_or(0))),
-        SortBy::Name => pane
-            .items
-            .sort_by_key(|e| e.file_name().to_string_lossy().to_lowercase()),
+        Some(SortBy::Size) => {
+            items.sort_by_key(|e| Reverse(e.metadata().map(|m| m.len()).unwrap_or(0)))
+        }
+        Some(SortBy::Name) => items.sort_by_key(|e| e.file_name().to_string_lossy().to_lowercase()),
     }
-    pane.selected = 0;
-    pane.marked.clear();
+    if dirs_first {
+        // Follows symlinks, like opening an entry does.
+        items.sort_by_key(|e| !e.path().is_dir());
+    }
+}
+
+/// Apply the chosen sort order to the given pane. The order is kept by
+/// later refreshes; the cursor and marks stay on the same files.
+pub fn apply_sort(pane: &mut crate::app::Pane, by: SortBy) {
+    pane.sort = Some(by);
+    pane.resort();
 }
 
 /// Find the next entry matching `query` (case-insensitive) after `start`, wrapping around.

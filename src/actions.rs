@@ -8,10 +8,11 @@ use crate::paste::{execute, prepare, ConflictChoice, PendingPaste, Planner};
 
 /// Toggle mark on the selected entry in the given pane.
 pub fn toggle_mark(pane: &mut Pane) {
-    if pane.marked.contains(&pane.selected) {
-        pane.marked.remove(&pane.selected);
-    } else {
-        pane.marked.insert(pane.selected);
+    let Some(path) = pane.selected_path() else {
+        return;
+    };
+    if !pane.marked.remove(&path) {
+        pane.marked.insert(path);
     }
 }
 
@@ -20,17 +21,12 @@ pub fn toggle_mark(pane: &mut Pane) {
 pub fn target_paths(app: &App) -> Vec<PathBuf> {
     let pane = app.current_pane();
     if pane.marked.is_empty() {
-        return pane
-            .items
-            .get(pane.selected)
-            .map(|e| e.path())
-            .into_iter()
-            .collect();
+        return pane.selected_path().into_iter().collect();
     }
-    let mut idx: Vec<usize> = pane.marked.iter().copied().collect();
-    idx.sort_unstable();
-    idx.iter()
-        .filter_map(|&i| pane.items.get(i).map(|e| e.path()))
+    pane.items
+        .iter()
+        .map(|e| e.path())
+        .filter(|p| pane.marked.contains(p))
         .collect()
 }
 
@@ -63,21 +59,8 @@ pub fn rename_selected(app: &mut App, new_name: &str) {
 
 /// Copy marked entries or the current entry into the clipboard.
 pub fn copy_selection(app: &mut App) {
-    let items = {
-        let pane = app.current_pane_mut();
-        let mut items = Vec::new();
-        if !pane.marked.is_empty() {
-            for &i in &pane.marked {
-                if let Some(entry) = pane.items.get(i) {
-                    items.push(entry.path());
-                }
-            }
-        } else if let Some(entry) = pane.items.get(pane.selected) {
-            items.push(entry.path());
-        }
-        pane.marked.clear();
-        items
-    };
+    let items = target_paths(app);
+    app.current_pane_mut().marked.clear();
     let n = items.len();
     app.clipboard = items;
     app.notify_info(format!("Copied {n} item(s) to clipboard"));

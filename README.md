@@ -101,12 +101,12 @@ sudo apt install ffmpeg
 - `Enter`: Enter the selected directory, open the text viewer for a text file, or show an image / video preview in the opposite pane. Press `Enter` (or `Esc` in preview) again to return to the file manager.
 - `o`: Open the selected entry with the default application (`open` on macOS), e.g. play a video in QuickTime. Works in the file list and in preview.
   On WSL the path is converted with `wslpath -w` and opened by `explorer.exe`. Set `KURA_OPENER` to use another program; it is split on whitespace and run as `<program> <args...> <path>` (e.g. `KURA_OPENER="code -r"` → `code -r <path>`).
-- `v`: Toggle selection of the current entry in file manager mode. Selected entries are marked with a `*` symbol.
+- `v`: Toggle selection of the current entry in file manager mode. Selected entries are marked with a `*` symbol. Marks and the cursor follow the files themselves, so they stay put when the list is refreshed or re-sorted (e.g. after paste, delete, rename or sorting).
 - `y`: Copy the current entry or all marked entries to the clipboard.
 - `p`: Paste copied entries into the current directory.
 - `/`: Enter search mode. Type a query to jump to matching entries; press Enter or Esc to exit search.
 - `r`: Rename the selected file; an inline prompt appears at the bottom.
-- `s`: Open a sort popup to choose ordering (modified/created/size/alphabetical).
+- `s`: Open a sort popup to choose ordering (modified/created/size/alphabetical). The chosen order is kept per pane, also when moving to another directory. The last row, `Directories first: on/off`, toggles listing directories before files (on by default).
 - `x`: Delete the selected entry or all marked entries from disk, after confirmation (`y` deletes; `n` / `Esc` / `Enter` / `q` cancel). This cannot be undone (there is no trash yet).
 - `X`: Same as `x` (permanent deletion from disk, cannot be undone), with a "Confirm Permanent Deletion" dialog. `x` will move items to the trash in a future release.
 - `q`: Quit the application

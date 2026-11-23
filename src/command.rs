@@ -12,7 +12,7 @@ use crate::actions::{
 };
 use crate::app::{fs_error_message, App};
 use crate::delete_confirm::DeleteKind;
-use crate::fs_utils::{apply_sort, find_match, SortBy, SORT_OPTIONS};
+use crate::fs_utils::{apply_sort, find_match, SortBy, DIRS_FIRST_ROW, SORT_MENU_ROWS};
 use crate::media::open_external;
 use crate::mode::{Mode, PaneType};
 use crate::paste::ConflictChoice;
@@ -134,7 +134,7 @@ impl App {
                 let pane = self.current_pane_mut();
                 let anchor = pane.selected;
                 pane.marked.clear();
-                pane.marked.insert(anchor);
+                pane.mark_index(anchor);
                 self.mode = Mode::Visual { anchor };
             }
             Command::Yank if filer => copy_selection(self),
@@ -185,14 +185,20 @@ impl App {
             Command::SortMenu if filer => self.mode = Mode::Sort { selected: 0 },
             Command::SortConfirm => {
                 if let Mode::Sort { selected } = self.mode {
-                    let by = match selected {
-                        0 => SortBy::Modified,
-                        1 => SortBy::Created,
-                        2 => SortBy::Size,
-                        _ => SortBy::Name,
-                    };
                     self.mode = Mode::Filer;
-                    apply_sort(self.current_pane_mut(), by);
+                    let pane = self.current_pane_mut();
+                    if selected == DIRS_FIRST_ROW {
+                        pane.dirs_first = !pane.dirs_first;
+                        pane.resort();
+                    } else {
+                        let by = match selected {
+                            0 => SortBy::Modified,
+                            1 => SortBy::Created,
+                            2 => SortBy::Size,
+                            _ => SortBy::Name,
+                        };
+                        apply_sort(pane, by);
+                    }
                 }
             }
             Command::InsertChar(c) => match &mut self.mode {
@@ -250,7 +256,7 @@ impl App {
                         (end, anchor)
                     };
                     for i in lo..=hi {
-                        pane.marked.insert(i);
+                        pane.mark_index(i);
                     }
                 }
             }
@@ -262,7 +268,7 @@ impl App {
                 };
             }
             Mode::Sort { selected } => {
-                let len = SORT_OPTIONS.len();
+                let len = SORT_MENU_ROWS;
                 for _ in 0..n {
                     *selected = if down {
                         (*selected + 1) % len
@@ -324,10 +330,12 @@ mod tests {
             .into_owned()
     }
 
+    /// Indices of the marked entries, in list order.
     fn marked(app: &App) -> Vec<usize> {
-        let mut v: Vec<usize> = app.current_pane().marked.iter().copied().collect();
-        v.sort_unstable();
-        v
+        let pane = app.current_pane();
+        (0..pane.items.len())
+            .filter(|&i| pane.marked.contains(&pane.items[i].path()))
+            .collect()
     }
 
     #[test]
@@ -409,13 +417,13 @@ mod tests {
         let tmp = abcd();
         fs::create_dir(tmp.path().join("sub")).unwrap();
         let mut app = app_in(tmp.path());
-        let _ = app.apply(Command::MoveDown(1));
+        // Directories come first: sub, a, b, c, d.
+        let _ = app.apply(Command::MoveDown(2));
         let _ = app.apply(Command::Yank);
         assert_eq!(app.clipboard, vec![tmp.path().join("b")]);
 
         let _ = app.apply(Command::MoveRight);
         assert!(app.active == PaneType::Right);
-        let _ = app.apply(Command::GoBottom);
         assert_eq!(selected_name(&app), "sub");
         let _ = app.apply(Command::Open);
         assert_eq!(app.current_pane().current_dir, tmp.path().join("sub"));
@@ -494,15 +502,180 @@ mod tests {
         fs::write(tmp.path().join("small"), "x").unwrap();
         fs::write(tmp.path().join("big"), "xxxxxxxx").unwrap();
         let mut app = app_in(tmp.path());
+        // The cursor starts on "big" (name order) and stays on it.
         let _ = app.apply(Command::SortMenu);
         let _ = app.apply(Command::MoveUp(1));
-        assert!(matches!(app.mode, Mode::Sort { selected: 3 }));
-        let _ = app.apply(Command::MoveUp(1));
+        assert!(matches!(
+            app.mode,
+            Mode::Sort {
+                selected: DIRS_FIRST_ROW
+            }
+        ));
+        let _ = app.apply(Command::MoveUp(2));
         let _ = app.apply(Command::SortConfirm); // 2 = File size
         assert!(matches!(app.mode, Mode::Filer));
+        assert_eq!(app.current_pane().sort, Some(SortBy::Size));
         assert_eq!(selected_name(&app), "big");
         let _ = app.apply(Command::MoveDown(1));
         assert_eq!(selected_name(&app), "small");
+    }
+
+    /// Names in list order.
+    fn names(app: &App) -> Vec<String> {
+        app.current_pane()
+            .items
+            .iter()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn sort_keeps_cursor_and_marks_on_the_same_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("a"), "xx").unwrap();
+        fs::write(tmp.path().join("b"), "x").unwrap();
+        fs::write(tmp.path().join("c"), "xxx").unwrap();
+        let mut app = app_in(tmp.path());
+        let _ = app.apply(Command::ToggleMark); // a
+        let _ = app.apply(Command::MoveDown(1)); // b
+        let _ = app.apply(Command::SortMenu);
+        let _ = app.apply(Command::MoveDown(2));
+        let _ = app.apply(Command::SortConfirm); // File size
+        assert_eq!(names(&app), ["c", "a", "b"]);
+        assert_eq!(selected_name(&app), "b");
+        assert_eq!(marked(&app), vec![1]); // still "a"
+    }
+
+    #[test]
+    fn refresh_keeps_sort_cursor_and_marks_after_external_changes() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("b"), "x").unwrap();
+        fs::write(tmp.path().join("d"), "xxx").unwrap();
+        let mut app = app_in(tmp.path());
+        let _ = app.apply(Command::SortMenu);
+        let _ = app.apply(Command::MoveDown(2));
+        let _ = app.apply(Command::SortConfirm); // File size: d, b
+        let _ = app.apply(Command::GoTop);
+        let _ = app.apply(Command::ToggleMark); // d
+        let _ = app.apply(Command::MoveDown(1)); // b
+
+        // Files appear from outside kura.
+        fs::write(tmp.path().join("a"), "xxxxx").unwrap();
+        fs::write(tmp.path().join("c"), "").unwrap();
+        app.current_pane_mut().refresh().unwrap();
+
+        assert_eq!(names(&app), ["a", "d", "b", "c"]);
+        assert_eq!(selected_name(&app), "b");
+        assert_eq!(marked(&app), vec![1]);
+        assert_eq!(app.current_pane().sort, Some(SortBy::Size));
+    }
+
+    #[test]
+    fn refresh_drops_marks_of_removed_files_and_clamps_cursor() {
+        let tmp = abcd();
+        let mut app = app_in(tmp.path());
+        let _ = app.apply(Command::ToggleMark); // a
+        let _ = app.apply(Command::GoBottom);
+        let _ = app.apply(Command::ToggleMark); // d
+        fs::remove_file(tmp.path().join("d")).unwrap();
+        app.current_pane_mut().refresh().unwrap();
+        assert_eq!(selected_name(&app), "c");
+        assert_eq!(marked(&app), vec![0]);
+        assert_eq!(app.current_pane().marked.len(), 1);
+    }
+
+    #[test]
+    fn paste_keeps_cursor_and_marks() {
+        let tmp = abcd();
+        let src = tempfile::tempdir().unwrap();
+        fs::write(src.path().join("0new"), "n").unwrap();
+        let mut app = app_in(tmp.path());
+        app.clipboard = vec![src.path().join("0new")];
+        let _ = app.apply(Command::MoveDown(1)); // b
+        let _ = app.apply(Command::ToggleMark);
+        let _ = app.apply(Command::MoveDown(1)); // c
+        let _ = app.apply(Command::Paste);
+        assert_eq!(names(&app), ["0new", "a", "b", "c", "d"]);
+        assert_eq!(selected_name(&app), "c");
+        assert_eq!(marked(&app), vec![2]);
+    }
+
+    #[test]
+    fn delete_moves_cursor_to_the_next_row() {
+        let tmp = abcd();
+        let mut app = app_in(tmp.path());
+        let _ = app.apply(Command::MoveDown(1)); // b
+        let _ = app.apply(Command::Delete(DeleteKind::Normal));
+        let _ = app.apply(Command::ConfirmDelete);
+        assert_eq!(names(&app), ["a", "c", "d"]);
+        assert_eq!(selected_name(&app), "c");
+    }
+
+    #[test]
+    fn dirs_first_is_on_by_default_and_toggles_from_the_sort_menu() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("a"), "").unwrap();
+        fs::create_dir(tmp.path().join("b")).unwrap();
+        fs::write(tmp.path().join("c"), "").unwrap();
+        fs::create_dir(tmp.path().join("d")).unwrap();
+        let mut app = app_in(tmp.path());
+        assert!(app.current_pane().dirs_first);
+        assert!(app.left.dirs_first && app.right.dirs_first);
+        assert_eq!(names(&app), ["b", "d", "a", "c"]);
+
+        // Toggle off; the cursor stays on "c".
+        let _ = app.apply(Command::GoBottom); // c
+        let _ = app.apply(Command::SortMenu);
+        let _ = app.apply(Command::MoveUp(1));
+        let _ = app.apply(Command::SortConfirm);
+        assert!(!app.current_pane().dirs_first);
+        assert_eq!(names(&app), ["a", "b", "c", "d"]);
+        assert_eq!(selected_name(&app), "c");
+
+        // Kept by refresh and when entering / leaving directories.
+        app.current_pane_mut().refresh().unwrap();
+        assert_eq!(names(&app), ["a", "b", "c", "d"]);
+        let _ = app.apply(Command::MoveUp(1)); // b
+        let _ = app.apply(Command::Open);
+        assert_eq!(app.current_pane().current_dir, tmp.path().join("b"));
+        let _ = app.apply(Command::MoveLeft);
+        assert_eq!(names(&app), ["a", "b", "c", "d"]);
+
+        // Toggle back on.
+        let _ = app.apply(Command::SortMenu);
+        let _ = app.apply(Command::MoveUp(1));
+        let _ = app.apply(Command::SortConfirm);
+        assert_eq!(names(&app), ["b", "d", "a", "c"]);
+    }
+
+    #[test]
+    fn sort_setting_is_kept_when_changing_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir(tmp.path().join("sub")).unwrap();
+        fs::write(tmp.path().join("sub/small"), "x").unwrap();
+        fs::write(tmp.path().join("sub/big"), "xxxxxxxx").unwrap();
+        let mut app = app_in(tmp.path());
+        let _ = app.apply(Command::SortMenu);
+        let _ = app.apply(Command::MoveDown(2));
+        let _ = app.apply(Command::SortConfirm); // File size
+        let _ = app.apply(Command::Open); // sub
+        assert_eq!(app.current_pane().sort, Some(SortBy::Size));
+        assert_eq!(names(&app), ["big", "small"]);
+    }
+
+    #[test]
+    fn rename_keeps_other_marks() {
+        let tmp = abcd();
+        let mut app = app_in(tmp.path());
+        let _ = app.apply(Command::GoBottom);
+        let _ = app.apply(Command::ToggleMark); // d
+        let _ = app.apply(Command::GoTop);
+        let _ = app.apply(Command::RenameStart);
+        let _ = app.apply(Command::InsertChar('z'));
+        let _ = app.apply(Command::RenameCommit);
+        assert_eq!(names(&app), ["az", "b", "c", "d"]);
+        assert_eq!(selected_name(&app), "az");
+        assert_eq!(marked(&app), vec![3]);
     }
 
     #[test]
