@@ -300,8 +300,9 @@ pub fn load_video_preview(picker: &Picker, path: &Path) -> Preview {
 /// How `open_external` should launch the opener.
 #[derive(Debug, PartialEq, Eq)]
 enum Opener {
-    /// User-specified program from `KURA_OPENER`, run as `<program> <path>`.
-    Custom(String),
+    /// User-specified command from `KURA_OPENER`, split on whitespace and run
+    /// as `<program> <args...> <path>` (e.g. `code -r` → `code -r <path>`).
+    Custom { program: String, args: Vec<String> },
     /// WSL: convert the path with `wslpath -w`, then run `explorer.exe <winpath>`.
     Wsl,
     /// Native default (`open` on macOS, `xdg-open` elsewhere).
@@ -315,10 +316,21 @@ fn is_wsl(distro_name: Option<&str>, osrelease: Option<&str>) -> bool {
         || osrelease.is_some_and(|s| s.to_lowercase().contains("microsoft"))
 }
 
+/// Parse a `KURA_OPENER` value into a custom opener. Returns `None` for an
+/// unset or whitespace-only value.
+fn parse_override(override_opener: Option<&str>) -> Option<Opener> {
+    let mut words = override_opener?.split_whitespace().map(str::to_string);
+    let program = words.next()?;
+    Some(Opener::Custom {
+        program,
+        args: words.collect(),
+    })
+}
+
 /// Decide which opener to use. A non-empty `KURA_OPENER` always wins.
 fn choose_opener(override_opener: Option<&str>, wsl: bool) -> Opener {
-    match override_opener.map(str::trim).filter(|s| !s.is_empty()) {
-        Some(prog) => Opener::Custom(prog.to_string()),
+    match parse_override(override_opener) {
+        Some(custom) => custom,
         None if wsl => Opener::Wsl,
         None => Opener::Native,
     }
@@ -334,23 +346,26 @@ fn parse_wslpath_output(stdout: &[u8]) -> io::Result<String> {
     Ok(s.to_string())
 }
 
-/// Build the (program, argument) pair to spawn. `win_path` must be provided
+/// Build the program and its arguments to spawn. `win_path` must be provided
 /// for [`Opener::Wsl`] (the result of `wslpath -w`).
-fn opener_command(opener: &Opener, path: &Path, win_path: Option<&str>) -> (String, OsString) {
+fn opener_command(opener: &Opener, path: &Path, win_path: Option<&str>) -> (String, Vec<OsString>) {
+    let path_arg = path.as_os_str().to_owned();
     match opener {
-        Opener::Custom(prog) => (prog.clone(), path.as_os_str().to_owned()),
+        Opener::Custom { program, args } => {
+            let mut argv: Vec<OsString> = args.iter().map(OsString::from).collect();
+            argv.push(path_arg);
+            (program.clone(), argv)
+        }
         Opener::Wsl => (
             "explorer.exe".to_string(),
-            win_path
-                .map(OsString::from)
-                .unwrap_or_else(|| path.as_os_str().to_owned()),
+            vec![win_path.map(OsString::from).unwrap_or(path_arg)],
         ),
         Opener::Native => {
             #[cfg(target_os = "macos")]
             let prog = "open";
             #[cfg(not(target_os = "macos"))]
             let prog = "xdg-open";
-            (prog.to_string(), path.as_os_str().to_owned())
+            (prog.to_string(), vec![path_arg])
         }
     }
 }
@@ -372,28 +387,26 @@ fn wslpath_windows(path: &Path) -> io::Result<String> {
 
 /// Open a file or directory with the OS default application.
 ///
-/// - `KURA_OPENER` (e.g. `code`) overrides the opener: runs `<opener> <path>`.
+/// - `KURA_OPENER` (e.g. `code -r`) overrides the opener: it is split on
+///   whitespace and run as `<program> <args...> <path>`.
 /// - On WSL, the path is converted with `wslpath -w` and opened by `explorer.exe`.
 /// - Otherwise `open` (macOS) or `xdg-open` is used.
 pub fn open_external(path: &Path) -> io::Result<()> {
     let override_opener = std::env::var("KURA_OPENER").ok();
-    let opener = match override_opener.as_deref() {
-        Some(o) if !o.trim().is_empty() => choose_opener(Some(o), false),
-        _ => {
-            let distro = std::env::var("WSL_DISTRO_NAME").ok();
-            let osrelease = fs::read_to_string("/proc/sys/kernel/osrelease").ok();
-            choose_opener(None, is_wsl(distro.as_deref(), osrelease.as_deref()))
-        }
-    };
+    let opener = parse_override(override_opener.as_deref()).unwrap_or_else(|| {
+        let distro = std::env::var("WSL_DISTRO_NAME").ok();
+        let osrelease = fs::read_to_string("/proc/sys/kernel/osrelease").ok();
+        choose_opener(None, is_wsl(distro.as_deref(), osrelease.as_deref()))
+    });
     let win_path = match opener {
         Opener::Wsl => Some(wslpath_windows(path)?),
         _ => None,
     };
-    let (program, arg) = opener_command(&opener, path, win_path.as_deref());
+    let (program, args) = opener_command(&opener, path, win_path.as_deref());
     // Note: explorer.exe exits with status 1 even on success, so only
     // spawn errors (e.g. program not found) are reported.
     Command::new(program)
-        .arg(arg)
+        .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -426,13 +439,26 @@ mod tests {
 
     #[test]
     fn override_wins_over_wsl() {
+        assert_eq!(choose_opener(Some("code"), true), custom("code", &[]));
+        assert_eq!(choose_opener(Some(" code "), false), custom("code", &[]));
+    }
+
+    fn custom(program: &str, args: &[&str]) -> Opener {
+        Opener::Custom {
+            program: program.into(),
+            args: args.iter().map(|a| a.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn override_is_split_on_whitespace() {
         assert_eq!(
-            choose_opener(Some("code"), true),
-            Opener::Custom("code".into())
+            choose_opener(Some("code -r"), false),
+            custom("code", &["-r"])
         );
         assert_eq!(
-            choose_opener(Some(" code "), false),
-            Opener::Custom("code".into())
+            choose_opener(Some("  open  -a   Preview "), true),
+            custom("open", &["-a", "Preview"])
         );
     }
 
@@ -453,19 +479,25 @@ mod tests {
         assert_eq!(prog, "explorer.exe");
         assert_eq!(
             arg,
-            OsString::from(r"\\wsl.localhost\Ubuntu\home\u\a b.mp4")
+            vec![OsString::from(r"\\wsl.localhost\Ubuntu\home\u\a b.mp4")]
         );
     }
 
     #[test]
     fn custom_command_passes_path_as_is() {
-        let (prog, arg) = opener_command(
-            &Opener::Custom("code".into()),
-            Path::new("/tmp/x.txt"),
-            None,
-        );
+        let (prog, args) = opener_command(&custom("code", &[]), Path::new("/tmp/a b.txt"), None);
         assert_eq!(prog, "code");
-        assert_eq!(arg, OsString::from("/tmp/x.txt"));
+        assert_eq!(args, vec![OsString::from("/tmp/a b.txt")]);
+    }
+
+    #[test]
+    fn custom_command_puts_path_after_args() {
+        let (prog, args) = opener_command(&custom("code", &["-r"]), Path::new("/tmp/x.txt"), None);
+        assert_eq!(prog, "code");
+        assert_eq!(
+            args,
+            vec![OsString::from("-r"), OsString::from("/tmp/x.txt")]
+        );
     }
 
     #[test]
