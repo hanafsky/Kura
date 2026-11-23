@@ -1,51 +1,13 @@
-use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
-    execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
-};
+use crossterm::event::{self, Event, KeyCode};
 use ratatui::{backend::Backend, Terminal};
 use std::time::Duration;
-use std::{fs, io, io::Write, path::Path, path::PathBuf};
-use viuer::{print_from_file, Config};
+use std::{fs, io, io::Write, path::PathBuf};
 
 use crate::actions::{copy_selection, delete_items, paste, toggle_mark};
 use crate::app::App;
-use crate::fs_utils::{apply_sort, find_match, is_image, SortBy, SORT_OPTIONS};
+use crate::fs_utils::{apply_sort, find_match, SortBy, SORT_OPTIONS};
+use crate::media::open_external;
 use crate::mode::{Mode, PaneType};
-
-/// Display the image at `path` using `viuer` and wait for Enter to return.
-pub fn show_image<B: Backend<Error = io::Error> + Write>(terminal: &mut Terminal<B>, path: &Path) -> io::Result<()> {
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
-    let config = Config::default();
-    if let Err(err) = print_from_file(path.to_string_lossy().as_ref(), &config) {
-        eprintln!("Failed to display image: {}", err);
-    }
-
-    loop {
-        if event::poll(Duration::from_millis(100))? {
-            if let Event::Key(key) = event::read()? {
-                if key.code == KeyCode::Enter {
-                    break;
-                }
-            }
-        }
-    }
-    // restore alternate screen and clear it before redrawing the UI
-    execute!(
-        terminal.backend_mut(),
-        EnterAlternateScreen,
-        EnableMouseCapture
-    )?;
-    terminal.clear()?;
-    <B as Backend>::flush(terminal.backend_mut())?;
-    enable_raw_mode()?;
-    Ok(())
-}
 
 /// Main event loop: handles input and dispatches actions.
 pub fn run_app<B: Backend<Error = io::Error> + Write>(terminal: &mut Terminal<B>, app: &mut App) -> io::Result<()> {
@@ -270,6 +232,15 @@ pub fn run_app<B: Backend<Error = io::Error> + Write>(terminal: &mut Terminal<B>
                         KeyCode::Enter => app.mode = Mode::Filer,
                         _ => {}
                     },
+                    Mode::Preview => match key.code {
+                        KeyCode::Enter | KeyCode::Esc => app.close_preview(),
+                        KeyCode::Char('o') => {
+                            if let Some(p) = app.selected_path() {
+                                let _ = open_external(&p);
+                            }
+                        }
+                        _ => {}
+                    },
                     Mode::Filer => match key.code {
                         KeyCode::Char('j') => (0..count).for_each(|_| app.on_down()),
                         KeyCode::Char('k') => (0..count).for_each(|_| app.on_up()),
@@ -308,21 +279,16 @@ pub fn run_app<B: Backend<Error = io::Error> + Write>(terminal: &mut Terminal<B>
                             delete_items(app, &items);
                         }
                         KeyCode::Enter => {
-                            let (is_img, path) = {
-                                let pane = app.current_pane_mut();
-                                pane.items
-                                    .get(pane.selected)
-                                    .map(|entry| {
-                                        let p = entry.path();
-                                        (is_image(&p), p)
-                                    })
-                                    .unwrap_or((false, PathBuf::new()))
-                            };
-                            if is_img {
-                                app.switch_pane();
-                                show_image(terminal, &path)?;
-                            } else {
+                            let previewed = app
+                                .selected_path()
+                                .is_some_and(|p| app.open_preview(&p));
+                            if !previewed {
                                 app.on_enter();
+                            }
+                        }
+                        KeyCode::Char('o') => {
+                            if let Some(p) = app.selected_path() {
+                                let _ = open_external(&p);
                             }
                         }
                         KeyCode::Char('h') => match app.active {

@@ -6,10 +6,12 @@ use ratatui::{
     Frame,
 };
 
-use crate::{app::App, app::Pane, mode::Mode, mode::PaneType};
+use ratatui_image::{Resize, StatefulImage};
+
+use crate::{app::App, app::Pane, media::Preview, mode::Mode, mode::PaneType};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-pub fn ui(f: &mut Frame, app: &App) {
+pub fn ui(f: &mut Frame, app: &mut App) {
     let size = f.area();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -30,7 +32,10 @@ pub fn ui(f: &mut Frame, app: &App) {
     f.render_widget(header, chunks[0]);
 
     let (content_area, footer_area) =
-        if matches!(app.mode, Mode::Search { .. } | Mode::Rename { .. }) {
+        if matches!(
+            app.mode,
+            Mode::Search { .. } | Mode::Rename { .. } | Mode::Preview
+        ) {
             let v = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([Constraint::Min(0), Constraint::Length(1)])
@@ -109,8 +114,24 @@ pub fn ui(f: &mut Frame, app: &App) {
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
             .split(content_area);
-        draw_pane(f, panes[0], &app.left, app.active == PaneType::Left);
-        draw_pane(f, panes[1], &app.right, app.active == PaneType::Right);
+        let left_active = app.active == PaneType::Left;
+        match (&mut app.preview, &app.mode) {
+            // Preview replaces the pane opposite to the active one.
+            (Some(preview), Mode::Preview) => {
+                let (pane_area, preview_area) = if left_active {
+                    (panes[0], panes[1])
+                } else {
+                    (panes[1], panes[0])
+                };
+                let pane = if left_active { &app.left } else { &app.right };
+                draw_pane(f, pane_area, pane, true);
+                draw_preview(f, preview_area, preview);
+            }
+            _ => {
+                draw_pane(f, panes[0], &app.left, left_active);
+                draw_pane(f, panes[1], &app.right, !left_active);
+            }
+        }
     }
 
     if let Mode::ConfirmDelete { items } = &app.mode {
@@ -150,6 +171,10 @@ pub fn ui(f: &mut Frame, app: &App) {
         let prompt = match &app.mode {
             Mode::Search { query } => format!("/{query}"),
             Mode::Rename { original, buffer } => format!("rename: {original} -> {buffer}"),
+            Mode::Preview => format!(
+                "Enter/Esc: close preview   o: open in default app   [{}]",
+                app.graphics_info
+            ),
             _ => String::new(),
         };
         let paragraph = Paragraph::new(prompt);
@@ -210,6 +235,44 @@ fn draw_pane(f: &mut Frame, area: Rect, pane: &Pane, active: bool) {
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
         .highlight_symbol(">> ");
     f.render_stateful_widget(list, area, &mut state);
+}
+
+fn draw_preview(
+    f: &mut Frame,
+    area: Rect,
+    preview: &mut Preview,
+) {
+    let block = Block::default().borders(Borders::ALL).title(Span::styled(
+        format!(" {} ", preview.title),
+        Style::default()
+            .fg(Color::Magenta)
+            .add_modifier(Modifier::BOLD),
+    ));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let info_height = (preview.info.len() as u16).min(inner.height);
+    let parts = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(info_height)])
+        .split(inner);
+
+    if let Some(image) = preview.image.as_mut() {
+        // Center the fitted image inside the available area.
+        let img_area = parts[0];
+        let fitted = image.size_for(Resize::Fit(None), img_area.as_size());
+        let x = img_area.x + img_area.width.saturating_sub(fitted.width) / 2;
+        let y = img_area.y + img_area.height.saturating_sub(fitted.height) / 2;
+        let centered = Rect::new(x, y, fitted.width, fitted.height);
+        f.render_stateful_widget(StatefulImage::default(), centered, image);
+    }
+
+    let lines: Vec<Line> = preview
+        .info
+        .iter()
+        .map(|l| Line::from(Span::styled(l.as_str(), Style::default().fg(Color::Gray))))
+        .collect();
+    f.render_widget(Paragraph::new(lines), parts[1]);
 }
 
 /// Helper to create a centered rect using the given percentage width and height of the available rect

@@ -33,4 +33,7 @@ pub enum Mode {
     Sort {
         selected: usize,
     },
+    /// Image/video preview shown in the pane opposite to the active one
+    /// (content lives in `App::preview`).
+    Preview,
 }

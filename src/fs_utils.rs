@@ -84,18 +84,3 @@ pub fn copy_dir_recursively(src: &Path, dst: &Path) -> io::Result<()> {
     }
     Ok(())
 }
-
-/// Simple image-detection by file extension.
-pub fn is_image(path: &Path) -> bool {
-    match path
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(str::to_lowercase)
-    {
-        Some(ext) => matches!(
-            ext.as_str(),
-            "png" | "jpg" | "jpeg" | "gif" | "bmp" | "tiff" | "tif" | "webp"
-        ),
-        None => false,
-    }
-}

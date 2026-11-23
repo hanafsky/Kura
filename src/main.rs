@@ -1,8 +1,10 @@
 mod actions;
 mod app;
 mod fs_utils;
+mod graphics;
 mod input;
 mod input_source;
+mod media;
 mod mode;
 mod ui;
 
@@ -24,7 +26,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
-    let mut app = App::new()?;
+    // Query the terminal for its graphics protocol and font size.
+    let (picker, graphics_info) = graphics::detect();
+    let mut app = App::new(picker)?;
+    app.graphics_info = graphics_info;
     let res = run_app(&mut terminal, &mut app);
     disable_raw_mode()?;
     execute!(

@@ -6,7 +6,8 @@ A simple terminal-based two-pane file manager written in Rust using ratatui and 
 
 - Dual-pane directory listing
 - Vim-like key bindings
-- Image viewer for common formats (png, jpeg, tiff, etc)
+- Image preview in the opposite pane (png, jpeg, gif, bmp, tiff, webp; heic/avif via ffmpeg), rendered with the Kitty / Sixel / iTerm2 graphics protocols when available
+- Video preview: a thumbnail plus duration / codec / resolution info (requires `ffmpeg` and `ffprobe`)
 
 ## Key Bindings
 
@@ -23,7 +24,8 @@ A simple terminal-based two-pane file manager written in Rust using ratatui and 
   - `h`: Switch to the left pane
   - `l`: Go to the parent directory
 
-- `Enter`: Enter the selected directory, open text viewer if a text file is selected, open image viewer in the opposite pane if an image file is selected, or close viewer and return to file manager
+- `Enter`: Enter the selected directory, open the text viewer for a text file, or show an image / video preview in the opposite pane. Press `Enter` (or `Esc` in preview) again to return to the file manager.
+- `o`: Open the selected entry with the default application (`open` on macOS), e.g. play a video in QuickTime. Works in the file list and in preview.
 - `v`: Toggle selection of the current entry in file manager mode. Selected entries are marked with a `*` symbol.
 - `y`: Copy the current entry or all marked entries to the clipboard.
 - `p`: Paste copied entries into the current directory.
@@ -46,3 +48,7 @@ A simple terminal-based two-pane file manager written in Rust using ratatui and 
 ```bash
 cargo run
 ```
+
+Video previews and HEIC/AVIF images need `ffmpeg` (`brew install ffmpeg`).
+
+The graphics protocol is detected automatically and shown in the preview footer. To force one, set `KURA_IMAGE_PROTOCOL` to `kitty`, `sixel`, `iterm2`, or `halfblocks`.

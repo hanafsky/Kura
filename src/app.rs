@@ -1,5 +1,8 @@
 use std::{collections::HashSet, fs, io, path::PathBuf};
 
+use ratatui_image::picker::Picker;
+
+use crate::media::{self, Preview};
 use crate::mode::{Mode, PaneType};
 
 pub struct Pane {
@@ -37,10 +40,15 @@ pub struct App {
     pub active: PaneType,
     pub mode: Mode,
     pub clipboard: Vec<PathBuf>,
+    /// Detects the terminal graphics protocol (Kitty / Sixel / iTerm2 / halfblocks).
+    pub picker: Picker,
+    pub preview: Option<Preview>,
+    /// Detected graphics protocol / font size (for the preview footer).
+    pub graphics_info: String,
 }
 
 impl App {
-    pub fn new() -> io::Result<Self> {
+    pub fn new(picker: Picker) -> io::Result<Self> {
         let cwd = std::env::current_dir()?;
         Ok(Self {
             left: Pane::new(cwd.clone())?,
@@ -48,6 +56,9 @@ impl App {
             active: PaneType::Left,
             mode: Mode::Filer,
             clipboard: Vec::new(),
+            picker,
+            preview: None,
+            graphics_info: String::new(),
         })
     }
 
@@ -85,6 +96,35 @@ impl App {
             pane.current_dir = parent.to_path_buf();
             let _ = pane.refresh();
         }
+    }
+
+    /// Path of the entry under the cursor in the active pane.
+    pub fn selected_path(&self) -> Option<PathBuf> {
+        let pane = match self.active {
+            PaneType::Left => &self.left,
+            PaneType::Right => &self.right,
+        };
+        pane.items.get(pane.selected).map(|e| e.path())
+    }
+
+    /// Show an image/video preview in the opposite pane. Returns false if
+    /// the path is not a previewable media file.
+    pub fn open_preview(&mut self, path: &std::path::Path) -> bool {
+        let preview = if media::is_image(path) {
+            media::load_image_preview(&self.picker, path)
+        } else if media::is_video(path) {
+            media::load_video_preview(&self.picker, path)
+        } else {
+            return false;
+        };
+        self.preview = Some(preview);
+        self.mode = Mode::Preview;
+        true
+    }
+
+    pub fn close_preview(&mut self) {
+        self.preview = None;
+        self.mode = Mode::Filer;
     }
 
     pub fn on_enter(&mut self) {

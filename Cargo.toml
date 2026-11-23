@@ -6,6 +6,9 @@ edition = "2021"
 [dependencies]
 crossterm = "0.29"
 ratatui = "0.30"
-image = "0.23"
-viuer = "0.4"
+ratatui-image = { version = "11.1", default-features = false, features = ["crossterm", "image-defaults"] }
+image = "0.25"
 unicode-width = "0.1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
