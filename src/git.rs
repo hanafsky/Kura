@@ -34,7 +34,7 @@ impl FileStatus {
             FileStatus::Conflicted => 'U',
             FileStatus::Untracked => '?',
             FileStatus::Ignored => '!',
-            FileStatus::DirtyDir => '•',
+            FileStatus::DirtyDir => '+',
         }
     }
 
@@ -52,7 +52,7 @@ impl FileStatus {
         }
     }
 
-    /// Whether the entry counts as a change (for `•` and the changed-only filter).
+    /// Whether the entry counts as a change (for `+` and the changed-only filter).
     pub fn is_change(self) -> bool {
         self != FileStatus::Ignored
     }
@@ -277,6 +277,15 @@ mod tests {
         assert_eq!(st.lookup("deep", true), Some(FileStatus::DirtyDir));
         // The prefix is used, so a same-named entry at the root does not match.
         assert_eq!(st.lookup("src", true), None);
+    }
+
+    #[test]
+    fn deleted_file_marks_its_directory() {
+        // A deleted file has no row of its own; its directory shows `+`.
+        let st = parse("1 .D N... 100644 100644 000000 aa aa docs/gone.md|", "");
+        assert_eq!(st.lookup("docs", true), Some(FileStatus::DirtyDir));
+        assert_eq!(FileStatus::DirtyDir.symbol(), '+');
+        assert!(FileStatus::DirtyDir.symbol().is_ascii());
     }
 
     #[test]

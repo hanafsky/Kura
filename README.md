@@ -122,7 +122,7 @@ sudo apt install ffmpeg
 - **Green**: Executable files
 - Others: Default color
 
-Inside a git repository, a status symbol is shown before each name: `M` modified, `A` added, `D` deleted, `R` renamed, `U` conflicted, `?` untracked, `!` ignored, `•` directory containing changes. The current branch is shown in the status line. The status is read when a directory is loaded (moving, paste, delete, rename), not continuously.
+Inside a git repository, a status symbol is shown before each name: `M` modified, `A` added, `D` deleted (deleted files have no row; their directory gets `+`), `R` renamed, `U` conflicted, `?` untracked, `!` ignored, `+` directory containing changes. The current branch is shown in the status line. The status is read when a directory is loaded (moving, paste, delete, rename), not continuously.
 
 ## Usage
 
