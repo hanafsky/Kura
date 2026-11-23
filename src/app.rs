@@ -6,6 +6,7 @@ use std::{
 
 use ratatui_image::picker::Picker;
 
+use crate::fs_utils::{sort_entries, SortBy};
 use crate::media::{self, Preview};
 use crate::mode::{Mode, PaneType};
 
@@ -13,39 +14,83 @@ pub struct Pane {
     pub items: Vec<fs::DirEntry>,
     pub selected: usize,
     pub current_dir: PathBuf,
-    pub marked: HashSet<usize>,
+    /// Marked entries, by path, so marks survive refreshes and re-sorting.
+    pub marked: HashSet<PathBuf>,
+    /// Chosen sort order (`None` = by name, byte order). Kept across refreshes.
+    pub sort: Option<SortBy>,
+    /// List directories before files (on by default).
+    pub dirs_first: bool,
 }
 
-/// Read a directory's entries sorted by name. Entries that cannot be read
-/// are skipped so that a single bad entry does not hide the whole listing.
-fn read_entries(path: &Path) -> io::Result<Vec<fs::DirEntry>> {
+/// Read a directory's entries in the given order. Entries that cannot be
+/// read are skipped so that a single bad entry does not hide the whole listing.
+fn read_entries(
+    path: &Path,
+    sort: Option<SortBy>,
+    dirs_first: bool,
+) -> io::Result<Vec<fs::DirEntry>> {
     let mut entries: Vec<fs::DirEntry> = fs::read_dir(path)?.filter_map(Result::ok).collect();
-    entries.sort_by_key(|e| e.file_name());
+    sort_entries(&mut entries, sort, dirs_first);
     Ok(entries)
 }
 
 impl Pane {
     pub fn new(path: PathBuf) -> io::Result<Self> {
-        let entries = read_entries(&path)?;
+        let entries = read_entries(&path, None, true)?;
         Ok(Self {
             items: entries,
             selected: 0,
             current_dir: path,
             marked: HashSet::new(),
+            sort: None,
+            dirs_first: true,
         })
     }
 
+    /// Path of the entry under the cursor.
+    pub fn selected_path(&self) -> Option<PathBuf> {
+        self.items.get(self.selected).map(|e| e.path())
+    }
+
+    /// Re-read the directory. The cursor stays on the same file (or the
+    /// same row if that file is gone) and marks on files that still exist.
     pub fn refresh(&mut self) -> io::Result<()> {
-        self.items = read_entries(&self.current_dir)?;
-        self.selected = 0;
-        self.marked.clear();
+        let cursor = self.selected_path();
+        self.items = read_entries(&self.current_dir, self.sort, self.dirs_first)?;
+        self.restore_cursor(cursor);
+        let present: HashSet<PathBuf> = self.items.iter().map(|e| e.path()).collect();
+        self.marked.retain(|p| present.contains(p));
         Ok(())
+    }
+
+    /// Re-order the listing with the current sort settings, keeping the
+    /// cursor on the same file.
+    pub fn resort(&mut self) {
+        let cursor = self.selected_path();
+        sort_entries(&mut self.items, self.sort, self.dirs_first);
+        self.restore_cursor(cursor);
+    }
+
+    /// Put the cursor on `path`, or keep the row (clamped to the list) if
+    /// it is not listed.
+    fn restore_cursor(&mut self, path: Option<PathBuf>) {
+        let found = path.and_then(|p| self.items.iter().position(|e| e.path() == p));
+        self.selected = found
+            .unwrap_or(self.selected)
+            .min(self.items.len().saturating_sub(1));
+    }
+
+    /// Mark the entry at `index` (no-op if out of range).
+    pub fn mark_index(&mut self, index: usize) {
+        if let Some(e) = self.items.get(index) {
+            self.marked.insert(e.path());
+        }
     }
 
     /// Move to `path`. The pane is only updated if the directory can be read;
     /// on error the current directory and listing are left untouched.
     pub fn change_dir(&mut self, path: PathBuf) -> io::Result<()> {
-        let entries = read_entries(&path)?;
+        let entries = read_entries(&path, self.sort, self.dirs_first)?;
         self.items = entries;
         self.current_dir = path;
         self.selected = 0;
@@ -205,8 +250,7 @@ impl App {
 
     /// Path of the entry under the cursor in the active pane.
     pub fn selected_path(&self) -> Option<PathBuf> {
-        let pane = self.current_pane();
-        pane.items.get(pane.selected).map(|e| e.path())
+        self.current_pane().selected_path()
     }
 
     /// Show an image/video preview in the opposite pane. Returns false if
@@ -293,13 +337,13 @@ mod tests {
 
         let mut pane = Pane::new(root.clone()).unwrap();
         pane.selected = 1;
-        pane.marked.insert(0);
+        pane.mark_index(0);
         assert!(pane.change_dir(root.join("missing")).is_err());
 
         assert_eq!(pane.current_dir, root);
         assert_eq!(pane.items.len(), 2);
         assert_eq!(pane.selected, 1);
-        assert!(pane.marked.contains(&0));
+        assert!(pane.marked.contains(&root.join("a.txt")));
         fs::remove_dir_all(&root).unwrap();
     }
 

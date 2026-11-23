@@ -152,10 +152,24 @@ pub fn ui(f: &mut Frame, app: &mut App) {
     }
 
     if let Mode::Sort { selected } = &app.mode {
-        let popup = centered_rect(40, 20, f.area());
+        // Tall enough for every row (borders included), within the screen.
+        let area = f.area();
+        let mut popup = centered_rect(40, 20, area);
+        popup.height = (crate::fs_utils::SORT_MENU_ROWS as u16 + 2).min(area.height);
+        popup.y = area.y + (area.height - popup.height) / 2;
         let block = Block::default().title("Sort By").borders(Borders::ALL);
+        let dirs_first = format!(
+            "Directories first: {}",
+            if app.current_pane().dirs_first {
+                "on"
+            } else {
+                "off"
+            }
+        );
         let items: Vec<ListItem> = crate::fs_utils::SORT_OPTIONS
             .iter()
+            .map(|option| option.to_string())
+            .chain(std::iter::once(dirs_first))
             .enumerate()
             .map(|(i, option)| {
                 let style = if i == *selected {
@@ -163,7 +177,7 @@ pub fn ui(f: &mut Frame, app: &mut App) {
                 } else {
                     Style::default()
                 };
-                ListItem::new(Line::from(Span::styled(*option, style)))
+                ListItem::new(Line::from(Span::styled(option, style)))
             })
             .collect();
         let list = List::new(items).block(block);
@@ -268,8 +282,7 @@ fn draw_pane(f: &mut Frame, area: Rect, pane: &Pane, active: bool) {
     let items: Vec<ListItem> = pane
         .items
         .iter()
-        .enumerate()
-        .map(|(i, e)| {
+        .map(|e| {
             let name = e.file_name().to_string_lossy().into_owned();
             let path = e.path();
             let style = if path.is_dir() {
@@ -296,7 +309,11 @@ fn draw_pane(f: &mut Frame, area: Rect, pane: &Pane, active: bool) {
                     Style::default()
                 }
             };
-            let marker = if pane.marked.contains(&i) { "*" } else { " " };
+            let marker = if pane.marked.contains(&path) {
+                "*"
+            } else {
+                " "
+            };
             ListItem::new(Line::from(vec![
                 Span::raw(format!("{marker} ")),
                 Span::styled(name, style),
