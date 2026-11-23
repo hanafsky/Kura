@@ -9,6 +9,80 @@ Rust製の、ターミナル上で動作するシンプルな2ペインファイ
 - 反対側のペインでの画像プレビュー（png、jpeg、gif、bmp、tiff、webp。heic/avif は ffmpeg 経由）。Kitty / Sixel / iTerm2 の画像プロトコルに対応したターミナルでは高画質で表示
 - 動画プレビュー：サムネイルと再生時間・コーデック・解像度などの情報（`ffmpeg` と `ffprobe` が必要）
 
+## 対応環境
+
+| OS | アーキテクチャ | リリースアセットの target |
+| --- | --- | --- |
+| macOS | Apple Silicon (arm64) | `aarch64-apple-darwin` |
+| macOS | Intel (x86_64) | `x86_64-apple-darwin` |
+| Linux / WSL2 | x86_64 | `x86_64-unknown-linux-musl` |
+| Linux / WSL2 | aarch64 | `aarch64-unknown-linux-musl` |
+
+Linux 向けバイナリは musl で静的リンクしているため、ディストリビューションを問わず、WSL2 上でもそのまま動作します。
+
+Windows ネイティブは**対象外**です。Windows では WSL2 上で kura を使ってください。
+
+## インストール
+
+### ビルド済みバイナリ（GitHub Releases）
+
+バイナリは [Releases ページ](https://github.com/hanafsky/Kura/releases) で公開されます。各リリースには、上表の target ごとに `kura-<target>.tar.gz`（アーカイブ）と `kura-<target>.tar.gz.sha256`（チェックサム）が添付されます。
+
+`curl` でダウンロードし、チェックサムを検証してから展開します。
+
+```bash
+# 上表から自分の環境の target を選ぶ
+TARGET=aarch64-apple-darwin
+
+curl -LO "https://github.com/hanafsky/Kura/releases/latest/download/kura-${TARGET}.tar.gz"
+curl -LO "https://github.com/hanafsky/Kura/releases/latest/download/kura-${TARGET}.tar.gz.sha256"
+
+# チェックサムを検証（"kura-<target>.tar.gz: OK" と表示されれば成功）
+shasum -a 256 -c "kura-${TARGET}.tar.gz.sha256"    # macOS
+# sha256sum -c "kura-${TARGET}.tar.gz.sha256"      # Linux / WSL2
+
+# 展開（アーカイブには kura-<target>/ ディレクトリが入っています）
+tar -xzf "kura-${TARGET}.tar.gz"
+
+# PATH の通ったディレクトリにバイナリを置く
+mkdir -p ~/.local/bin
+mv "kura-${TARGET}/kura" ~/.local/bin/
+```
+
+`~/.local/bin`（または配置先に選んだディレクトリ）が `PATH` に含まれていることを確認してください。
+
+#### macOS：ブラウザでダウンロードした場合
+
+`curl` でダウンロードしたファイルには quarantine 属性が付かないため、上記の手順では追加の操作は不要です。ブラウザでアーカイブをダウンロードした場合は、kura が署名されていないため macOS の Gatekeeper により実行がブロックされることがあります。展開したバイナリから quarantine 属性を外してください。
+
+```bash
+xattr -d com.apple.quarantine ~/.local/bin/kura
+```
+
+（`No such xattr` と表示された場合は属性が付いていないので、そのままで問題ありません。）
+
+### Cargo でソースからビルド
+
+Rust ツールチェーン（[rustup](https://rustup.rs/) など）が入っていれば、次のコマンドで導入できます。
+
+```bash
+cargo install --git https://github.com/hanafsky/Kura
+```
+
+`kura` は `~/.cargo/bin` にインストールされます。
+
+### ffmpeg（任意）
+
+動画プレビューと HEIC/AVIF 画像の表示には `ffmpeg` と `ffprobe` が必要です（どちらも `ffmpeg` パッケージに含まれます）。
+
+```bash
+# macOS（Homebrew）
+brew install ffmpeg
+
+# Debian / Ubuntu / WSL2
+sudo apt install ffmpeg
+```
+
 ## キー操作
 
 - `j` / `k`: 現在のペイン内で下／上に移動（テキストビューアモード時はスクロール）。数値プレフィックス対応（例: `4j` で4行下に、`3k` で3行上へ移動）。テキストビューアモードでは、相対行番号を表示し、プレフィックス数の目安とします。
@@ -49,6 +123,6 @@ Rust製の、ターミナル上で動作するシンプルな2ペインファイ
 cargo run
 ```
 
-動画プレビューと HEIC/AVIF 画像の表示には `ffmpeg` が必要です（`brew install ffmpeg`）。
+動画プレビューと HEIC/AVIF 画像の表示には `ffmpeg` が必要です（[ffmpeg（任意）](#ffmpeg任意) を参照）。
 
 画像の表示方式は自動判定され、プレビュー下部に表示されます。強制したい場合は環境変数 `KURA_IMAGE_PROTOCOL` に `kitty` / `sixel` / `iterm2` / `halfblocks` を指定してください。
