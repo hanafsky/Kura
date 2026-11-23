@@ -9,6 +9,7 @@ ratatui = "0.30"
 ratatui-image = { version = "11.1", default-features = false, features = ["crossterm", "image-defaults"] }
 image = "0.25"
 unicode-width = "0.1"
+trash = "5.4"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

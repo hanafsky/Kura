@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 /// How the confirmed items will be removed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DeleteKind {
-    /// `x`: regular delete (currently also permanent; becomes trash in #12).
+    /// `x`: move to the OS trash.
     Normal,
     /// `X`: permanent delete that cannot be undone.
     Permanent,
@@ -42,7 +42,7 @@ pub fn confirm_key(code: KeyCode) -> ConfirmAction {
 /// Dialog title for the given kind.
 pub fn dialog_title(kind: DeleteKind) -> &'static str {
     match kind {
-        DeleteKind::Normal => "Confirm Deletion",
+        DeleteKind::Normal => "Confirm Move to Trash",
         DeleteKind::Permanent => "Confirm Permanent Deletion",
     }
 }
@@ -60,13 +60,13 @@ fn display_name(path: &Path) -> String {
 /// question and the "(y/N)" prompt always fit.
 pub fn dialog_lines(items: &[PathBuf], kind: DeleteKind, max_lines: usize) -> Vec<String> {
     let n = items.len();
-    let mut header = vec![match kind {
-        DeleteKind::Normal => format!("Delete {n} item(s)?"),
-        DeleteKind::Permanent => format!("Permanently delete {n} item(s)?"),
-    }];
-    // Both `x` and `X` remove files from disk today, so both warn.
-    // TODO(#12): drop the warning for `x` once it moves items to the trash.
-    header.push("This cannot be undone.".to_string());
+    let header = match kind {
+        DeleteKind::Normal => vec![format!("Move {n} item(s) to Trash?")],
+        DeleteKind::Permanent => vec![
+            format!("Permanently delete {n} item(s)?"),
+            "This cannot be undone.".to_string(),
+        ],
+    };
     // header + blank + names + blank + prompt
     let fixed = header.len() + 3;
     let room = max_lines.saturating_sub(fixed).min(MAX_LISTED_NAMES);
@@ -94,7 +94,10 @@ pub fn dialog_lines(items: &[PathBuf], kind: DeleteKind, max_lines: usize) -> Ve
         lines.extend(names);
     }
     lines.push(String::new());
-    lines.push("Press y to delete, n/Esc/Enter to cancel (y/N)".to_string());
+    lines.push(match kind {
+        DeleteKind::Normal => "Press y to move to Trash, n/Esc/Enter to cancel (y/N)".to_string(),
+        DeleteKind::Permanent => "Press y to delete, n/Esc/Enter to cancel (y/N)".to_string(),
+    });
     lines
 }
 
@@ -125,7 +128,7 @@ mod tests {
     #[test]
     fn lists_all_names_when_few() {
         let lines = dialog_lines(&paths(3), DeleteKind::Normal, 100);
-        assert_eq!(lines[0], "Delete 3 item(s)?");
+        assert_eq!(lines[0], "Move 3 item(s) to Trash?");
         assert!(lines.contains(&"  f0".to_string()));
         assert!(lines.contains(&"  f2".to_string()));
         assert!(!lines.iter().any(|l| l.contains("more")));
@@ -148,25 +151,31 @@ mod tests {
 
     #[test]
     fn fits_small_heights() {
-        for h in 0..20 {
-            let lines = dialog_lines(&paths(25), DeleteKind::Permanent, h);
-            // Question and prompt are always present.
-            assert!(lines[0].starts_with("Permanently delete 25"));
-            assert!(lines.last().unwrap().contains("(y/N)"));
-            if h >= 5 {
-                assert!(lines.len() <= h, "h={h} len={}", lines.len());
+        for (kind, question, min_h) in [
+            (DeleteKind::Permanent, "Permanently delete 25", 5),
+            (DeleteKind::Normal, "Move 25 item(s) to Trash?", 4),
+        ] {
+            for h in 0..20 {
+                let lines = dialog_lines(&paths(25), kind, h);
+                // Question and prompt are always present.
+                assert!(lines[0].starts_with(question));
+                assert!(lines.last().unwrap().contains("(y/N)"));
+                if h >= min_h {
+                    assert!(lines.len() <= h, "{kind:?} h={h} len={}", lines.len());
+                }
             }
         }
     }
 
     #[test]
-    fn both_kinds_warn_irreversible() {
+    fn only_permanent_warns_irreversible() {
         let lines = dialog_lines(&paths(1), DeleteKind::Permanent, 100);
         assert_eq!(lines[0], "Permanently delete 1 item(s)?");
         assert_eq!(lines[1], "This cannot be undone.");
         let normal = dialog_lines(&paths(1), DeleteKind::Normal, 100);
-        assert_eq!(normal[0], "Delete 1 item(s)?");
-        assert_eq!(normal[1], "This cannot be undone.");
+        assert_eq!(normal[0], "Move 1 item(s) to Trash?");
+        assert!(!normal.iter().any(|l| l.contains("cannot be undone")));
+        assert!(normal.last().unwrap().contains("move to Trash"));
         assert_ne!(
             dialog_title(DeleteKind::Normal),
             dialog_title(DeleteKind::Permanent)

@@ -146,10 +146,11 @@ impl App {
                 }
             }
             Command::ConfirmDelete => {
-                if let Mode::ConfirmDelete { items, .. } = &mut self.mode {
+                if let Mode::ConfirmDelete { items, kind } = &mut self.mode {
                     let to_delete = std::mem::take(items);
+                    let kind = *kind;
                     self.mode = Mode::Filer;
-                    delete_items(self, &to_delete);
+                    delete_items(self, &to_delete, kind);
                 }
             }
             Command::ResolvePaste(choice) => resolve_paste_conflict(self, choice),
@@ -305,6 +306,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::MessageLevel;
     use ratatui_image::picker::Picker;
     use std::fs;
     use std::path::Path;
@@ -399,6 +401,41 @@ mod tests {
         assert!(!tmp.path().join("c").exists());
         assert!(tmp.path().join("b").exists());
         assert_eq!(app.current_pane().items.len(), 2);
+        assert_eq!(app.message.as_ref().unwrap().text, "Deleted 2 item(s)");
+    }
+
+    #[test]
+    fn x_asks_to_move_to_trash() {
+        let tmp = abcd();
+        let mut app = app_in(tmp.path());
+        let _ = app.apply(Command::Delete(DeleteKind::Normal));
+        match &app.mode {
+            Mode::ConfirmDelete { items, kind } => {
+                assert_eq!(items, &vec![tmp.path().join("a")]);
+                assert_eq!(*kind, DeleteKind::Normal);
+            }
+            _ => panic!("expected the delete dialog"),
+        }
+    }
+
+    /// Confirming `x` goes through the trash path, which reports a failure
+    /// and never falls back to deleting from disk. A vanished entry is used
+    /// so the test does not touch the real OS trash.
+    #[test]
+    fn confirm_trash_reports_failure_without_deleting() {
+        let tmp = abcd();
+        let mut app = app_in(tmp.path());
+        let gone = tmp.path().join("gone");
+        app.mode = Mode::ConfirmDelete {
+            items: vec![gone],
+            kind: DeleteKind::Normal,
+        };
+        let _ = app.apply(Command::ConfirmDelete);
+        assert!(matches!(app.mode, Mode::Filer));
+        let msg = app.message.as_ref().unwrap();
+        assert_eq!(msg.level, MessageLevel::Error);
+        assert!(msg.text.ends_with("(moved 0, failed 1)"), "{}", msg.text);
+        assert!(tmp.path().join("a").exists());
     }
 
     #[test]

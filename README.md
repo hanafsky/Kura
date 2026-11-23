@@ -107,8 +107,9 @@ sudo apt install ffmpeg
 - `/`: Enter search mode. Type a query to jump to matching entries; press Enter or Esc to exit search.
 - `r`: Rename the selected file; an inline prompt appears at the bottom.
 - `s`: Open a sort popup to choose ordering (modified/created/size/alphabetical). The chosen order is kept per pane, also when moving to another directory. The last row, `Directories first: on/off`, toggles listing directories before files (on by default).
-- `x`: Delete the selected entry or all marked entries from disk, after confirmation (`y` deletes; `n` / `Esc` / `Enter` / `q` cancel). This cannot be undone (there is no trash yet).
-- `X`: Same as `x` (permanent deletion from disk, cannot be undone), with a "Confirm Permanent Deletion" dialog. `x` will move items to the trash in a future release.
+- `x`: Move the selected entry or all marked entries to the OS trash, after confirmation (`y` confirms; `n` / `Esc` / `Enter` / `q` cancel). If the trash is not available (e.g. on WSL or some Linux setups), an error is shown in the status line and nothing is deleted.
+  kura cannot list or restore items in the trash. On macOS, open the Trash in Finder and drag the item back (or use "Put Back" where it is shown).
+- `X`: Permanently delete the selected entry or all marked entries from disk, after a "Confirm Permanent Deletion" dialog. This cannot be undone.
 - `q`: Quit the application
 
 ## Color Map

@@ -442,7 +442,9 @@ mod tests {
         assert!(screen.contains("(y/N)"));
 
         let screen = render(&items[..2], DeleteKind::Normal, 80, 30);
-        assert!(screen.contains("Delete 2 item(s)?"));
+        assert!(screen.contains("Move 2 item(s) to Trash?"));
         assert!(screen.contains("f1"));
+        assert!(screen.contains("(y/N)"));
+        assert!(!screen.contains("cannot be undone"));
     }
 }
