@@ -311,7 +311,7 @@ enum Opener {
 
 /// Detect WSL from the `WSL_DISTRO_NAME` env var and the contents of
 /// `/proc/sys/kernel/osrelease`.
-fn is_wsl(distro_name: Option<&str>, osrelease: Option<&str>) -> bool {
+pub(crate) fn is_wsl(distro_name: Option<&str>, osrelease: Option<&str>) -> bool {
     distro_name.is_some_and(|s| !s.trim().is_empty())
         || osrelease.is_some_and(|s| s.to_lowercase().contains("microsoft"))
 }
