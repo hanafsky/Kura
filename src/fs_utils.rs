@@ -74,14 +74,10 @@ pub fn find_match(entries: &[DirEntry], query: &str, start: usize) -> Option<usi
 /// `n == 1`, `name (copy n).ext` for `n >= 2`. Directories keep their whole
 /// name as the stem (`dir.d (copy)`).
 pub fn copy_name(file_name: &OsStr, is_dir: bool, n: usize) -> OsString {
-    let as_path = Path::new(file_name);
     let (stem, ext) = if is_dir {
         (file_name, None)
     } else {
-        (
-            as_path.file_stem().unwrap_or(file_name),
-            as_path.extension(),
-        )
+        split_extension(file_name)
     };
     let mut out = OsString::from(stem);
     if n <= 1 {
@@ -94,6 +90,36 @@ pub fn copy_name(file_name: &OsStr, is_dir: bool, n: usize) -> OsString {
         out.push(ext);
     }
     out
+}
+
+/// Compression suffixes that form a single extension together with `.tar`.
+const TAR_COMPRESSIONS: &[&str] = &["gz", "bz2", "xz", "zst", "lz4", "lz", "lzma", "z", "br"];
+
+/// Split a file name into stem and extension at the last `.`, except that
+/// common double extensions such as `.tar.gz` are kept together.
+fn split_extension(file_name: &OsStr) -> (&OsStr, Option<OsString>) {
+    let as_path = Path::new(file_name);
+    let stem = as_path.file_stem().unwrap_or(file_name);
+    let Some(ext) = as_path.extension() else {
+        return (stem, None);
+    };
+    let inner = Path::new(stem);
+    let is_tar = inner
+        .extension()
+        .and_then(OsStr::to_str)
+        .is_some_and(|e| e.eq_ignore_ascii_case("tar"));
+    let is_compression = ext
+        .to_str()
+        .is_some_and(|e| TAR_COMPRESSIONS.iter().any(|c| e.eq_ignore_ascii_case(c)));
+    if is_tar && is_compression {
+        if let (Some(base), Some(tar)) = (inner.file_stem(), inner.extension()) {
+            let mut double = OsString::from(tar);
+            double.push(".");
+            double.push(ext);
+            return (base, Some(double));
+        }
+    }
+    (stem, Some(ext.to_os_string()))
 }
 
 /// Decide where a pasted entry named `file_name` should land in `dst_dir`.
@@ -225,6 +251,53 @@ mod tests {
         assert_eq!(n("Makefile", false, 1), "Makefile (copy)");
         assert_eq!(n(".bashrc", false, 3), ".bashrc (copy 3)");
         assert_eq!(n("conf.d", true, 1), "conf.d (copy)");
+    }
+
+    #[test]
+    fn copy_name_keeps_tar_double_extensions() {
+        let n = |s: &str, i| copy_name(OsStr::new(s), false, i);
+        assert_eq!(n("archive.tar.gz", 1), "archive (copy).tar.gz");
+        assert_eq!(n("archive.tar.gz", 2), "archive (copy 2).tar.gz");
+        assert_eq!(n("a.tar.bz2", 1), "a (copy).tar.bz2");
+        assert_eq!(n("a.tar.xz", 1), "a (copy).tar.xz");
+        assert_eq!(n("a.tar.zst", 1), "a (copy).tar.zst");
+        assert_eq!(n("a.tar.lz4", 1), "a (copy).tar.lz4");
+        assert_eq!(n("A.TAR.GZ", 1), "A (copy).TAR.GZ");
+        assert_eq!(n("v1.2.tar.gz", 1), "v1.2 (copy).tar.gz");
+    }
+
+    #[test]
+    fn copy_name_splits_other_names_at_last_dot() {
+        let n = |s: &str| copy_name(OsStr::new(s), false, 1);
+        assert_eq!(n("a.tar"), "a (copy).tar");
+        assert_eq!(n("a.txt.gz"), "a.txt (copy).gz");
+        assert_eq!(n("a.tar.txt"), "a.tar (copy).txt");
+        assert_eq!(n("a.gz"), "a (copy).gz");
+        assert_eq!(n(".tar.gz"), ".tar (copy).gz");
+    }
+
+    #[test]
+    fn copy_name_does_not_split_directories() {
+        assert_eq!(
+            copy_name(OsStr::new("src.tar.gz"), true, 1),
+            "src.tar.gz (copy)"
+        );
+    }
+
+    #[test]
+    fn paste_destination_numbers_tar_gz() {
+        let taken: HashSet<PathBuf> = ["/d/archive.tar.gz", "/d/archive (copy).tar.gz"]
+            .iter()
+            .map(PathBuf::from)
+            .collect();
+        let dst = paste_destination(
+            OsStr::new("archive.tar.gz"),
+            Path::new("/d"),
+            false,
+            true,
+            |p| taken.contains(p),
+        );
+        assert_eq!(dst, Path::new("/d/archive (copy 2).tar.gz"));
     }
 
     #[test]
