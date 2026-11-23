@@ -26,6 +26,10 @@ pub struct Pane {
     pub git: Option<GitStatus>,
     /// Show only entries with git changes (toggled with `M`).
     pub git_filter: bool,
+    /// List hidden entries (names starting with `.`; toggled with `.`, on by default).
+    pub show_hidden: bool,
+    /// Hide entries ignored by git (toggled with `i`; only inside a repository).
+    pub hide_ignored: bool,
 }
 
 /// Read a directory's entries in the given order. Entries that cannot be
@@ -49,19 +53,50 @@ fn entry_status(git: Option<&GitStatus>, e: &fs::DirEntry) -> Option<FileStatus>
     git?.lookup(&e.file_name().to_string_lossy(), is_dir_entry(e))
 }
 
-/// Keep only entries with git changes when the filter is on (and the
-/// directory is in a repository).
+/// Which entries a pane lists. Every field is the filter actually in
+/// effect (git filters are off outside a repository).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ListFilter {
+    /// Only entries with git changes (`M`).
+    pub changed_only: bool,
+    /// Hide names starting with `.` (`.`).
+    pub hide_hidden: bool,
+    /// Hide entries ignored by git (`i`).
+    pub hide_ignored: bool,
+}
+
+/// Whether an entry named `name` with git status `status` is listed.
+pub fn is_visible(name: &str, status: Option<FileStatus>, filter: ListFilter) -> bool {
+    if filter.hide_hidden && name.starts_with('.') {
+        return false;
+    }
+    if filter.hide_ignored && status == Some(FileStatus::Ignored) {
+        return false;
+    }
+    if filter.changed_only && !status.is_some_and(FileStatus::is_change) {
+        return false;
+    }
+    true
+}
+
+/// Keep only the entries `filter` lets through.
 fn filter_entries(
     entries: Vec<fs::DirEntry>,
     git: Option<&GitStatus>,
-    changed_only: bool,
+    filter: ListFilter,
 ) -> Vec<fs::DirEntry> {
-    if !changed_only || git.is_none() {
+    if filter == ListFilter::default() {
         return entries;
     }
     entries
         .into_iter()
-        .filter(|e| entry_status(git, e).is_some_and(FileStatus::is_change))
+        .filter(|e| {
+            is_visible(
+                &e.file_name().to_string_lossy(),
+                entry_status(git, e),
+                filter,
+            )
+        })
         .collect()
 }
 
@@ -78,6 +113,8 @@ impl Pane {
             dirs_first: true,
             git,
             git_filter: false,
+            show_hidden: true,
+            hide_ignored: false,
         })
     }
 
@@ -99,7 +136,7 @@ impl Pane {
     fn reload(&mut self) -> io::Result<()> {
         let cursor = self.selected_path();
         let entries = read_entries(&self.current_dir, self.sort, self.dirs_first)?;
-        self.items = filter_entries(entries, self.git.as_ref(), self.git_filter);
+        self.items = filter_entries(entries, self.git.as_ref(), self.list_filter());
         self.restore_cursor(cursor);
         let present: HashSet<PathBuf> = self.items.iter().map(|e| e.path()).collect();
         self.marked.retain(|p| present.contains(p));
@@ -116,14 +153,46 @@ impl Pane {
         self.git_filter && self.git.is_some()
     }
 
-    /// Toggle the changed-only filter using the cached git status.
-    pub fn toggle_git_filter(&mut self) -> io::Result<()> {
-        self.git_filter = !self.git_filter;
+    /// Whether ignored entries are currently hidden. Inside an ignored
+    /// directory (e.g. after entering `target/`) nothing is hidden, since
+    /// every entry there is ignored.
+    pub fn ignore_filter_active(&self) -> bool {
+        self.hide_ignored && self.git.as_ref().is_some_and(|g| !g.in_ignored_dir())
+    }
+
+    /// The filter in effect for the current directory.
+    pub fn list_filter(&self) -> ListFilter {
+        ListFilter {
+            changed_only: self.git_filter_active(),
+            hide_hidden: !self.show_hidden,
+            hide_ignored: self.ignore_filter_active(),
+        }
+    }
+
+    /// Flip one filter flag and re-list using the cached git status; the
+    /// flag is restored if the directory cannot be read.
+    fn toggle_flag(&mut self, flag: fn(&mut Pane) -> &mut bool) -> io::Result<()> {
+        *flag(self) ^= true;
         let result = self.reload();
         if result.is_err() {
-            self.git_filter = !self.git_filter;
+            *flag(self) ^= true;
         }
         result
+    }
+
+    /// Toggle the changed-only filter using the cached git status.
+    pub fn toggle_git_filter(&mut self) -> io::Result<()> {
+        self.toggle_flag(|p| &mut p.git_filter)
+    }
+
+    /// Toggle listing hidden (dot) entries.
+    pub fn toggle_hidden(&mut self) -> io::Result<()> {
+        self.toggle_flag(|p| &mut p.show_hidden)
+    }
+
+    /// Toggle hiding git-ignored entries using the cached git status.
+    pub fn toggle_ignored(&mut self) -> io::Result<()> {
+        self.toggle_flag(|p| &mut p.hide_ignored)
     }
 
     /// Re-order the listing with the current sort settings, keeping the
@@ -155,7 +224,7 @@ impl Pane {
     pub fn change_dir(&mut self, path: PathBuf) -> io::Result<()> {
         let entries = read_entries(&path, self.sort, self.dirs_first)?;
         self.git = git::read_status(&path);
-        self.items = filter_entries(entries, self.git.as_ref(), self.git_filter);
+        self.items = filter_entries(entries, self.git.as_ref(), self.list_filter());
         self.current_dir = path;
         self.selected = 0;
         self.marked.clear();
@@ -230,6 +299,8 @@ pub struct App {
     /// Working directory kura was started in (the agent's project root);
     /// `@path` copies are made relative to it.
     pub launch_dir: PathBuf,
+    /// Query of the last search, repeated by `n` / `N`.
+    pub last_search: Option<String>,
 }
 
 impl App {
@@ -250,6 +321,7 @@ impl App {
             graphics_info: String::new(),
             message: None,
             launch_dir: dir,
+            last_search: None,
         })
     }
 
@@ -336,6 +408,42 @@ impl App {
         self.notify_info(text);
     }
 
+    /// Toggle listing hidden (dot) entries in the active pane (`.`).
+    pub fn toggle_hidden(&mut self) {
+        let pane = self.current_pane_mut();
+        if let Err(e) = pane.toggle_hidden() {
+            let dir = pane.current_dir.clone();
+            self.notify_error(fs_error_message(&e, &dir));
+            return;
+        }
+        let text = if pane.show_hidden {
+            "Showing hidden files"
+        } else {
+            "Hiding hidden files"
+        };
+        self.notify_info(text);
+    }
+
+    /// Toggle hiding git-ignored entries in the active pane (`i`).
+    pub fn toggle_ignored(&mut self) {
+        let pane = self.current_pane_mut();
+        if pane.git.is_none() {
+            self.notify_info("Not a git repository");
+            return;
+        }
+        if let Err(e) = pane.toggle_ignored() {
+            let dir = pane.current_dir.clone();
+            self.notify_error(fs_error_message(&e, &dir));
+            return;
+        }
+        let text = if pane.hide_ignored {
+            "Hiding git-ignored files"
+        } else {
+            "Showing git-ignored files"
+        };
+        self.notify_info(text);
+    }
+
     /// Path of the entry under the cursor in the active pane.
     pub fn selected_path(&self) -> Option<PathBuf> {
         self.current_pane().selected_path()
@@ -399,6 +507,42 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn is_visible_combines_the_filters() {
+        let all = ListFilter::default();
+        let no_hidden = ListFilter {
+            hide_hidden: true,
+            ..all
+        };
+        let no_ignored = ListFilter {
+            hide_ignored: true,
+            ..all
+        };
+        let changed = ListFilter {
+            changed_only: true,
+            ..all
+        };
+        let ignored = Some(FileStatus::Ignored);
+        let modified = Some(FileStatus::Modified);
+
+        assert!(is_visible(".env", ignored, all));
+        assert!(!is_visible(".env", None, no_hidden));
+        assert!(is_visible("a.env", None, no_hidden));
+        assert!(!is_visible("target", ignored, no_ignored));
+        assert!(is_visible("src", Some(FileStatus::DirtyDir), no_ignored));
+        assert!(is_visible("new", Some(FileStatus::Untracked), no_ignored));
+        assert!(is_visible("a", None, no_ignored));
+        assert!(!is_visible("a", None, changed));
+        assert!(!is_visible("target", ignored, changed));
+        // Combined with `M`: a changed dot file is hidden by `.`.
+        let both = ListFilter {
+            hide_hidden: true,
+            ..changed
+        };
+        assert!(!is_visible(".github", modified, both));
+        assert!(is_visible("src", modified, both));
     }
 
     #[test]

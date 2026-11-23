@@ -36,6 +36,10 @@ const FILER_KEYS: Bindings = &[
     (KeyCode::Char('/'), Command::SearchStart),
     (KeyCode::Char('s'), Command::SortMenu),
     (KeyCode::Char('M'), Command::ToggleGitFilter),
+    (KeyCode::Char('.'), Command::ToggleHidden),
+    (KeyCode::Char('i'), Command::ToggleIgnored),
+    (KeyCode::Char('n'), Command::SearchNext),
+    (KeyCode::Char('N'), Command::SearchPrev),
 ];
 
 /// Visual (range) selection.
@@ -247,6 +251,13 @@ mod tests {
         assert_eq!(run(&f, &[ch('Y')]), [Command::CopyAtPaths]);
         assert_eq!(run(&f, &[ch('M')]), [Command::ToggleGitFilter]);
         assert_eq!(run(&search(), &[ch('M')]), [Command::InsertChar('M')]);
+        assert_eq!(run(&f, &[ch('.')]), [Command::ToggleHidden]);
+        assert_eq!(run(&f, &[ch('i')]), [Command::ToggleIgnored]);
+        assert_eq!(run(&f, &[ch('n')]), [Command::SearchNext]);
+        assert_eq!(run(&f, &[ch('N')]), [Command::SearchPrev]);
+        for c in ['.', 'i', 'n', 'N'] {
+            assert_eq!(run(&search(), &[ch(c)]), [Command::InsertChar(c)]);
+        }
         assert_eq!(run(&f, &[ch('z')]), []);
         assert_eq!(run(&f, &[KeyCode::Down]), []);
     }
