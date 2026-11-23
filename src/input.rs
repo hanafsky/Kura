@@ -20,6 +20,8 @@ pub fn run_app<B: Backend<Error = io::Error> + Write>(
         terminal.draw(|f| crate::ui::ui(f, app))?;
         if event::poll(Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
+                // A status message stays until the next key press.
+                app.message = None;
                 // Text-input modes must receive every character (including 'q', 'g', 'G').
                 let text_input = matches!(app.mode, Mode::Search { .. } | Mode::Rename { .. });
                 if key.code == KeyCode::Char('q') && !text_input {
@@ -196,9 +198,7 @@ pub fn run_app<B: Backend<Error = io::Error> + Write>(
                     let pane = app.current_pane_mut();
                     let old = pane.items[pane.selected].path();
                     let newp = old.with_file_name(&new_name);
-                    if let Err(e) = fs::rename(&old, &newp) {
-                        eprintln!("Failed to rename {:?} to {:?}: {}", old, newp, e);
-                    }
+                    let result = fs::rename(&old, &newp);
                     if pane.refresh().is_ok() {
                         if let Some(pos) = pane
                             .items
@@ -207,6 +207,14 @@ pub fn run_app<B: Backend<Error = io::Error> + Write>(
                         {
                             pane.selected = pos;
                         }
+                    }
+                    match result {
+                        Ok(()) => app.notify_info(format!("Renamed to {new_name}")),
+                        Err(e) => app.notify_error(format!(
+                            "Failed to rename {} to {}: {e}",
+                            old.display(),
+                            newp.display()
+                        )),
                     }
                     continue;
                 }
@@ -239,7 +247,12 @@ pub fn run_app<B: Backend<Error = io::Error> + Write>(
                         KeyCode::Enter | KeyCode::Esc => app.close_preview(),
                         KeyCode::Char('o') => {
                             if let Some(p) = app.selected_path() {
-                                let _ = open_external(&p);
+                                if let Err(e) = open_external(&p) {
+                                    app.notify_error(format!(
+                                        "Failed to open {}: {e}",
+                                        p.display()
+                                    ));
+                                }
                             }
                         }
                         _ => {}
@@ -290,7 +303,12 @@ pub fn run_app<B: Backend<Error = io::Error> + Write>(
                         }
                         KeyCode::Char('o') => {
                             if let Some(p) = app.selected_path() {
-                                let _ = open_external(&p);
+                                if let Err(e) = open_external(&p) {
+                                    app.notify_error(format!(
+                                        "Failed to open {}: {e}",
+                                        p.display()
+                                    ));
+                                }
                             }
                         }
                         KeyCode::Char('h') => match app.active {
@@ -333,9 +351,10 @@ pub fn run_app<B: Backend<Error = io::Error> + Write>(
                             copy_selection(app);
                         }
                         KeyCode::Char('p') => {
-                            // TODO(#4): show the error in the status line.
-                            if let Err(e) = paste(app) {
-                                eprintln!("Failed to paste: {}", e);
+                            let n = app.clipboard.len();
+                            match paste(app) {
+                                Ok(()) => app.notify_info(format!("Pasted {n} item(s)")),
+                                Err(e) => app.notify_error(format!("Failed to paste: {e}")),
                             }
                         }
                         _ => {}
