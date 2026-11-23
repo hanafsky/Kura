@@ -39,6 +39,8 @@ pub enum Command {
     Open,
     /// Open the entry under the cursor with the system's default application.
     OpenExternal,
+    /// Open the file under the cursor in `$VISUAL` / `$EDITOR` / `vi`.
+    OpenEditor,
     /// Mark / unmark the entry under the cursor.
     ToggleMark,
     /// Start a Visual (range) selection at the cursor.
@@ -142,6 +144,18 @@ impl App {
                 if let Some(p) = self.selected_path() {
                     if let Err(e) = open_external(&p) {
                         self.notify_error(fs_error_message(&e, &p));
+                    }
+                }
+            }
+            Command::OpenEditor if filer => {
+                if let Some(p) = self.selected_path() {
+                    if p.is_dir() {
+                        self.notify_error(format!(
+                            "Cannot edit a directory: {}",
+                            p.file_name().unwrap_or_default().to_string_lossy()
+                        ));
+                    } else {
+                        self.pending_edit = Some(p);
                     }
                 }
             }
@@ -453,6 +467,32 @@ mod tests {
         assert_eq!(selected_name(&app), "a");
         let _ = app.apply(Command::GoBottom);
         assert_eq!(selected_name(&app), "d");
+    }
+
+    #[test]
+    fn open_editor_requests_the_file_under_the_cursor() {
+        let tmp = abcd();
+        fs::create_dir(tmp.path().join("dir")).unwrap();
+        let mut app = app_in(tmp.path());
+        // Directories are listed first: the cursor starts on "dir".
+        let _ = app.apply(Command::OpenEditor);
+        assert_eq!(app.pending_edit, None);
+        assert!(app
+            .message
+            .as_ref()
+            .is_some_and(|m| m.level == MessageLevel::Error && m.text.contains("dir")));
+        let _ = app.apply(Command::MoveDown(1));
+        assert!(app.apply(Command::OpenEditor).is_continue());
+        assert_eq!(app.pending_edit, Some(tmp.path().join("a")));
+    }
+
+    #[test]
+    fn open_editor_is_ignored_outside_the_file_list() {
+        let tmp = abcd();
+        let mut app = app_in(tmp.path());
+        let _ = app.apply(Command::SearchStart);
+        let _ = app.apply(Command::OpenEditor);
+        assert_eq!(app.pending_edit, None);
     }
 
     #[test]

@@ -301,18 +301,29 @@ pub struct App {
     pub launch_dir: PathBuf,
     /// Query of the last search, repeated by `n` / `N`.
     pub last_search: Option<String>,
+    /// File to open in `$EDITOR` once the event loop gets control back
+    /// (set by `e`; the loop owns the terminal, so it runs the editor).
+    pub pending_edit: Option<PathBuf>,
 }
 
 impl App {
-    pub fn new(picker: Picker) -> io::Result<Self> {
-        Self::with_dir(picker, std::env::current_dir()?)
+    /// Start with both panes in `dir`.
+    #[cfg(test)]
+    pub fn with_dir(picker: Picker, dir: PathBuf) -> io::Result<Self> {
+        Self::with_panes(picker, dir.clone(), dir.clone(), dir)
     }
 
-    /// Start with both panes in `dir`.
-    pub fn with_dir(picker: Picker, dir: PathBuf) -> io::Result<Self> {
+    /// Start with the left / right panes in the given directories.
+    /// `launch_dir` is the base for `@path` copies.
+    pub fn with_panes(
+        picker: Picker,
+        left: PathBuf,
+        right: PathBuf,
+        launch_dir: PathBuf,
+    ) -> io::Result<Self> {
         Ok(Self {
-            left: Pane::new(dir.clone())?,
-            right: Pane::new(dir.clone())?,
+            left: Pane::new(left)?,
+            right: Pane::new(right)?,
             active: PaneType::Left,
             mode: Mode::Filer,
             clipboard: Vec::new(),
@@ -320,8 +331,9 @@ impl App {
             preview: None,
             graphics_info: String::new(),
             message: None,
-            launch_dir: dir,
+            launch_dir,
             last_search: None,
+            pending_edit: None,
         })
     }
 

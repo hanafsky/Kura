@@ -101,6 +101,7 @@ sudo apt install ffmpeg
 - `Enter`: 選択したディレクトリに入る。テキストファイル選択時はテキストビューアを、画像・動画ファイル選択時は反対側のペインにプレビューを表示。再度`Enter`（プレビュー中は`Esc`も可）でファイルマネージャに戻ります。
 - `o`: 選択中のエントリを既定のアプリで開きます（macOS では `open`）。動画を QuickTime で再生する場合などに使います。ファイル一覧・プレビュー中のどちらでも使えます。
   WSL では `wslpath -w` で変換したパスを `explorer.exe` で開きます。環境変数 `KURA_OPENER` を設定すると任意のプログラムで開けます。値は空白で区切られ、`<program> <args...> <path>` の形で実行されます（例: `KURA_OPENER="code -r"` → `code -r <path>`）。
+- `e`: 選択中のファイルをエディタで開きます（`$VISUAL`、未設定なら `$EDITOR`、どちらもなければ `vi`）。値は `KURA_OPENER` と同様に空白で区切られます（例: `EDITOR="code -w"`）。エディタの実行中は kura の画面を抜け、終了すると画面を戻して一覧を再読み込みします。
 - `v`: ファイルマネージャモードで現在のエントリを選択／解除します。選択されたエントリは `*` でマークされます。
 - `y`: カーソル行またはマークされたすべてのエントリをクリップボードにコピーします。
 - `p`: コピーしたエントリを現在のディレクトリに貼り付けます。
@@ -138,3 +139,44 @@ cargo run
 動画プレビューと HEIC/AVIF 画像の表示には `ffmpeg` が必要です（[ffmpeg（任意）](#ffmpeg任意) を参照）。
 
 画像の表示方式は自動判定され、プレビュー下部に表示されます。強制したい場合は環境変数 `KURA_IMAGE_PROTOCOL` に `kitty` / `sixel` / `iterm2` / `halfblocks` を指定してください。
+
+### コマンドライン引数
+
+```
+kura [OPTIONS] [LEFT] [RIGHT]
+```
+
+- `LEFT` / `RIGHT`: 左右のペインで開くディレクトリ。1つだけ指定すると左ペインに使われます。省略したペインはカレントディレクトリで開きます。
+- `--last-dir-path <FILE>`: 終了時に、アクティブなペインのディレクトリを `FILE` に書き出します（下記参照）。
+- `-h`, `--help` / `-V`, `--version`
+
+### 終了時にディレクトリを移動する（cd-on-exit）
+
+プログラムからは親シェルのカレントディレクトリを変えられないため、ラッパー関数を使います。`--last-dir-path` を付けて kura を起動し、終了時にアクティブだったディレクトリへ `cd` します。
+
+```bash
+# ~/.bashrc または ~/.zshrc
+k() {
+    local tmp dir
+    tmp="$(mktemp)" || return
+    command kura --last-dir-path "$tmp" "$@"
+    dir="$(cat -- "$tmp")"
+    rm -f -- "$tmp"
+    if [ -n "$dir" ] && [ -d "$dir" ] && [ "$dir" != "$PWD" ]; then
+        cd -- "$dir" || return
+    fi
+}
+```
+
+```fish
+# ~/.config/fish/functions/k.fish
+function k
+    set -l tmp (mktemp); or return
+    command kura --last-dir-path $tmp $argv
+    set -l dir (cat -- $tmp)
+    rm -f -- $tmp
+    if test -n "$dir"; and test -d "$dir"; and test "$dir" != "$PWD"
+        cd $dir
+    end
+end
+```
