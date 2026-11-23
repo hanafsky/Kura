@@ -333,7 +333,10 @@ pub fn run_app<B: Backend<Error = io::Error> + Write>(
                             copy_selection(app);
                         }
                         KeyCode::Char('p') => {
-                            paste(app);
+                            // TODO(#4): show the error in the status line.
+                            if let Err(e) = paste(app) {
+                                eprintln!("Failed to paste: {}", e);
+                            }
                         }
                         _ => {}
                     },

@@ -1,8 +1,9 @@
 use std::{
     cmp::Reverse,
+    ffi::{OsStr, OsString},
     fs::{self, DirEntry},
     io,
-    path::Path,
+    path::{Path, PathBuf},
     time::UNIX_EPOCH,
 };
 
@@ -69,18 +70,264 @@ pub fn find_match(entries: &[DirEntry], query: &str, start: usize) -> Option<usi
     None
 }
 
-/// Recursively copy a directory.
+/// Build the `n`-th "copy" variant of a file name: `name (copy).ext` for
+/// `n == 1`, `name (copy n).ext` for `n >= 2`. Directories keep their whole
+/// name as the stem (`dir.d (copy)`).
+pub fn copy_name(file_name: &OsStr, is_dir: bool, n: usize) -> OsString {
+    let as_path = Path::new(file_name);
+    let (stem, ext) = if is_dir {
+        (file_name, None)
+    } else {
+        (
+            as_path.file_stem().unwrap_or(file_name),
+            as_path.extension(),
+        )
+    };
+    let mut out = OsString::from(stem);
+    if n <= 1 {
+        out.push(" (copy)");
+    } else {
+        out.push(format!(" (copy {n})"));
+    }
+    if let Some(ext) = ext {
+        out.push(".");
+        out.push(ext);
+    }
+    out
+}
+
+/// Decide where a pasted entry named `file_name` should land in `dst_dir`.
+///
+/// `same_location` tells whether the source already lives at
+/// `dst_dir/file_name`. In that case the first free `(copy)` / `(copy n)`
+/// name is chosen using `exists`; otherwise the plain name is returned.
+/// Pure function: no filesystem access besides the injected `exists`.
+pub fn paste_destination(
+    file_name: &OsStr,
+    dst_dir: &Path,
+    is_dir: bool,
+    same_location: bool,
+    exists: impl Fn(&Path) -> bool,
+) -> PathBuf {
+    if !same_location {
+        return dst_dir.join(file_name);
+    }
+    (1..)
+        .map(|n| dst_dir.join(copy_name(file_name, is_dir, n)))
+        .find(|p| !exists(p))
+        .expect("an unused copy name always exists")
+}
+
+/// Resolve `path` to an absolute path without requiring the final component
+/// to exist (its parent must exist).
+fn canonicalize_lenient(path: &Path) -> io::Result<PathBuf> {
+    match fs::canonicalize(path) {
+        Ok(p) => Ok(p),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            let parent = path.parent().filter(|p| !p.as_os_str().is_empty());
+            let parent = fs::canonicalize(parent.unwrap_or(Path::new(".")))?;
+            match path.file_name() {
+                Some(name) => Ok(parent.join(name)),
+                None => Err(e),
+            }
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Whether `src` (an existing entry) and `dst_dir/file_name` refer to the
+/// same location on disk.
+pub fn is_same_location(src: &Path, dst_dir: &Path) -> io::Result<bool> {
+    let (Some(parent), Some(_)) = (src.parent(), src.file_name()) else {
+        return Ok(false);
+    };
+    let parent = if parent.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        parent
+    };
+    Ok(fs::canonicalize(parent)? == fs::canonicalize(dst_dir)?)
+}
+
+/// Copy a single entry (file, directory or symlink) from `src` to `dst`.
+/// Symlinks are never followed; they are recreated as links.
+pub fn copy_entry(src: &Path, dst: &Path) -> io::Result<()> {
+    let meta = fs::symlink_metadata(src)?;
+    if meta.file_type().is_symlink() {
+        copy_symlink(src, dst)
+    } else if meta.is_dir() {
+        copy_dir_recursively(src, dst)
+    } else {
+        if canonicalize_lenient(src)? == canonicalize_lenient(dst)? {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("cannot copy {} onto itself", src.display()),
+            ));
+        }
+        fs::copy(src, dst).map(|_| ())
+    }
+}
+
+fn copy_symlink(src: &Path, dst: &Path) -> io::Result<()> {
+    let target = fs::read_link(src)?;
+    std::os::unix::fs::symlink(target, dst)
+}
+
+/// Recursively copy a directory without following symlinks.
+///
+/// Fails with `InvalidInput` if `dst` is `src` itself or lies inside it,
+/// which would otherwise recurse forever.
 pub fn copy_dir_recursively(src: &Path, dst: &Path) -> io::Result<()> {
+    let src_abs = fs::canonicalize(src)?;
+    let dst_abs = canonicalize_lenient(dst)?;
+    if dst_abs.starts_with(&src_abs) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "cannot copy directory {} into itself ({})",
+                src.display(),
+                dst.display()
+            ),
+        ));
+    }
+    copy_dir_inner(src, dst)
+}
+
+fn copy_dir_inner(src: &Path, dst: &Path) -> io::Result<()> {
     fs::create_dir_all(dst)?;
     for entry in fs::read_dir(src)? {
         let entry = entry?;
         let path = entry.path();
         let dst_path = dst.join(entry.file_name());
-        if path.is_dir() {
-            copy_dir_recursively(&path, &dst_path)?;
+        let ft = entry.file_type()?;
+        if ft.is_symlink() {
+            copy_symlink(&path, &dst_path)?;
+        } else if ft.is_dir() {
+            copy_dir_inner(&path, &dst_path)?;
         } else {
             fs::copy(&path, &dst_path)?;
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+    use std::os::unix::fs::symlink;
+
+    #[test]
+    fn copy_name_variants() {
+        let n = |s: &str, d, i| copy_name(OsStr::new(s), d, i);
+        assert_eq!(n("a.txt", false, 1), "a (copy).txt");
+        assert_eq!(n("a.txt", false, 2), "a (copy 2).txt");
+        assert_eq!(n("Makefile", false, 1), "Makefile (copy)");
+        assert_eq!(n(".bashrc", false, 3), ".bashrc (copy 3)");
+        assert_eq!(n("conf.d", true, 1), "conf.d (copy)");
+    }
+
+    #[test]
+    fn paste_destination_keeps_name_for_other_dir() {
+        let dst = paste_destination(OsStr::new("a.txt"), Path::new("/d"), false, false, |_| true);
+        assert_eq!(dst, Path::new("/d/a.txt"));
+    }
+
+    #[test]
+    fn paste_destination_picks_first_free_copy_name() {
+        let taken: HashSet<PathBuf> = ["/d/a.txt", "/d/a (copy).txt", "/d/a (copy 2).txt"]
+            .iter()
+            .map(PathBuf::from)
+            .collect();
+        let dst = paste_destination(OsStr::new("a.txt"), Path::new("/d"), false, true, |p| {
+            taken.contains(p)
+        });
+        assert_eq!(dst, Path::new("/d/a (copy 3).txt"));
+    }
+
+    #[test]
+    fn copy_entry_onto_itself_is_rejected_and_keeps_content() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f = tmp.path().join("a.txt");
+        fs::write(&f, "hello").unwrap();
+        let err = copy_entry(&f, &f).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(fs::read_to_string(&f).unwrap(), "hello");
+    }
+
+    #[test]
+    fn copy_dir_into_itself_is_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("dir");
+        fs::create_dir(&src).unwrap();
+        fs::write(src.join("f"), "x").unwrap();
+        let err = copy_dir_recursively(&src, &src).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(fs::read_to_string(src.join("f")).unwrap(), "x");
+    }
+
+    #[test]
+    fn copy_dir_into_descendant_is_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("dir");
+        fs::create_dir_all(src.join("sub")).unwrap();
+        let dst = src.join("sub").join("dir");
+        let err = copy_dir_recursively(&src, &dst).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert!(!dst.exists());
+    }
+
+    #[test]
+    fn copy_dir_to_sibling_with_similar_prefix_is_allowed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("dir");
+        fs::create_dir(&src).unwrap();
+        fs::write(src.join("f"), "x").unwrap();
+        let dst = tmp.path().join("dir (copy)");
+        copy_dir_recursively(&src, &dst).unwrap();
+        assert_eq!(fs::read_to_string(dst.join("f")).unwrap(), "x");
+    }
+
+    #[test]
+    fn symlinks_are_copied_as_links() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("dir");
+        fs::create_dir(&src).unwrap();
+        fs::write(src.join("target.txt"), "t").unwrap();
+        symlink("target.txt", src.join("link")).unwrap();
+        let dst = tmp.path().join("out");
+        copy_dir_recursively(&src, &dst).unwrap();
+        let copied = dst.join("link");
+        assert!(fs::symlink_metadata(&copied)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read_link(&copied).unwrap(), Path::new("target.txt"));
+    }
+
+    #[test]
+    fn symlink_loop_does_not_recurse() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("dir");
+        fs::create_dir_all(src.join("sub")).unwrap();
+        symlink("..", src.join("sub").join("up")).unwrap();
+        symlink(&src, src.join("self")).unwrap();
+        let dst = tmp.path().join("out");
+        copy_dir_recursively(&src, &dst).unwrap();
+        assert_eq!(fs::read_link(dst.join("sub/up")).unwrap(), Path::new(".."));
+        assert_eq!(fs::read_link(dst.join("self")).unwrap(), src);
+    }
+
+    #[test]
+    fn top_level_symlink_is_copied_as_link() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("real");
+        fs::create_dir(&dir).unwrap();
+        let link = tmp.path().join("link");
+        symlink(&dir, &link).unwrap();
+        let dst = tmp.path().join("link2");
+        copy_entry(&link, &dst).unwrap();
+        assert!(fs::symlink_metadata(&dst).unwrap().file_type().is_symlink());
+        assert_eq!(fs::read_link(&dst).unwrap(), dir);
+    }
 }
