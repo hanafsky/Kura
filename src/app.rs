@@ -163,6 +163,9 @@ pub struct App {
     pub graphics_info: String,
     /// Message shown in the status line (errors, result counts).
     pub message: Option<Message>,
+    /// Working directory kura was started in (the agent's project root);
+    /// `@path` copies are made relative to it.
+    pub launch_dir: PathBuf,
 }
 
 impl App {
@@ -174,7 +177,7 @@ impl App {
     pub fn with_dir(picker: Picker, dir: PathBuf) -> io::Result<Self> {
         Ok(Self {
             left: Pane::new(dir.clone())?,
-            right: Pane::new(dir)?,
+            right: Pane::new(dir.clone())?,
             active: PaneType::Left,
             mode: Mode::Filer,
             clipboard: Vec::new(),
@@ -182,6 +185,7 @@ impl App {
             preview: None,
             graphics_info: String::new(),
             message: None,
+            launch_dir: dir,
         })
     }
 

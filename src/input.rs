@@ -29,6 +29,7 @@ const FILER_KEYS: Bindings = &[
     (KeyCode::Char('V'), Command::VisualStart),
     (KeyCode::Char('y'), Command::Yank),
     (KeyCode::Char('p'), Command::Paste),
+    (KeyCode::Char('Y'), Command::CopyAtPaths),
     (KeyCode::Char('x'), Command::Delete(DeleteKind::Normal)),
     (KeyCode::Char('X'), Command::Delete(DeleteKind::Permanent)),
     (KeyCode::Char('r'), Command::RenameStart),
@@ -242,6 +243,7 @@ mod tests {
         );
         assert_eq!(run(&f, &[ch('x')]), [Command::Delete(DeleteKind::Normal)]);
         assert_eq!(run(&f, &[ch('p')]), [Command::Paste]);
+        assert_eq!(run(&f, &[ch('Y')]), [Command::CopyAtPaths]);
         assert_eq!(run(&f, &[ch('z')]), []);
         assert_eq!(run(&f, &[KeyCode::Down]), []);
     }

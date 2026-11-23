@@ -46,6 +46,9 @@ pub enum Command {
     Yank,
     /// Paste the clipboard into the current directory.
     Paste,
+    /// Copy the marked entries (or the one under the cursor) to the system
+    /// clipboard as `@path` references for coding agents.
+    CopyAtPaths,
     /// Ask for confirmation to delete the marked entries (or the one under the cursor).
     Delete(DeleteKind),
     /// Confirm the pending deletion.
@@ -139,6 +142,7 @@ impl App {
             }
             Command::Yank if filer => copy_selection(self),
             Command::Paste if filer => paste(self),
+            Command::CopyAtPaths if filer => crate::clipboard::copy_at_paths(self),
             Command::Delete(kind) if filer => {
                 let items = target_paths(self);
                 if !items.is_empty() {
@@ -740,5 +744,42 @@ mod tests {
         let _ = app.apply(Command::Yank);
         assert!(matches!(app.mode, Mode::Sort { .. }));
         assert!(app.clipboard.is_empty());
+    }
+
+    fn last_copy() -> Option<String> {
+        crate::clipboard::LAST_COPY.with(|c| c.borrow_mut().take())
+    }
+
+    #[test]
+    fn copy_at_paths_copies_marked_entries_relative_to_launch_dir() {
+        let tmp = abcd();
+        let mut app = app_in(tmp.path());
+        let _ = app.apply(Command::MoveDown(3));
+        let _ = app.apply(Command::ToggleMark);
+        let _ = app.apply(Command::MoveUp(2));
+        let _ = app.apply(Command::ToggleMark);
+        let _ = app.apply(Command::CopyAtPaths);
+        assert_eq!(last_copy().as_deref(), Some("@b @d"));
+        assert!(marked(&app).is_empty());
+        assert_eq!(app.message.as_ref().unwrap().text, "Copied 2 path(s)");
+    }
+
+    #[test]
+    fn copy_at_paths_without_marks_uses_the_cursor_entry() {
+        let tmp = abcd();
+        let mut app = app_in(tmp.path());
+        let _ = app.apply(Command::MoveDown(2));
+        let _ = app.apply(Command::CopyAtPaths);
+        assert_eq!(last_copy().as_deref(), Some("@c"));
+        assert_eq!(app.message.as_ref().unwrap().text, "Copied 1 path(s)");
+    }
+
+    #[test]
+    fn copy_at_paths_is_ignored_outside_the_file_list() {
+        let tmp = abcd();
+        let mut app = app_in(tmp.path());
+        let _ = app.apply(Command::SortMenu);
+        let _ = app.apply(Command::CopyAtPaths);
+        assert_eq!(last_copy(), None);
     }
 }
