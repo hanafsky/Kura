@@ -2,6 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::app::{fs_error_message, App, Pane};
+use crate::fs_utils::ensure_rename_target_free;
 use crate::mode::Mode;
 use crate::paste::{execute, prepare, ConflictChoice, PendingPaste, Planner};
 
@@ -11,6 +12,52 @@ pub fn toggle_mark(pane: &mut Pane) {
         pane.marked.remove(&pane.selected);
     } else {
         pane.marked.insert(pane.selected);
+    }
+}
+
+/// Paths to act on: the marked entries (in list order), or the entry under
+/// the cursor when nothing is marked.
+pub fn target_paths(app: &App) -> Vec<PathBuf> {
+    let pane = app.current_pane();
+    if pane.marked.is_empty() {
+        return pane
+            .items
+            .get(pane.selected)
+            .map(|e| e.path())
+            .into_iter()
+            .collect();
+    }
+    let mut idx: Vec<usize> = pane.marked.iter().copied().collect();
+    idx.sort_unstable();
+    idx.iter()
+        .filter_map(|&i| pane.items.get(i).map(|e| e.path()))
+        .collect()
+}
+
+/// Rename the entry under the cursor to `new_name` (in the same directory),
+/// refresh the pane and put the cursor on the renamed entry.
+pub fn rename_selected(app: &mut App, new_name: &str) {
+    let pane = app.current_pane_mut();
+    let Some(old) = pane.items.get(pane.selected).map(|e| e.path()) else {
+        return;
+    };
+    let newp = old.with_file_name(new_name);
+    // Unix `rename` silently replaces an existing entry; refuse instead.
+    let result = ensure_rename_target_free(&old, &newp)
+        .map_err(|e| (e, newp.clone()))
+        .and_then(|()| fs::rename(&old, &newp).map_err(|e| (e, old.clone())));
+    if pane.refresh().is_ok() {
+        if let Some(pos) = pane
+            .items
+            .iter()
+            .position(|e| e.file_name().to_string_lossy() == new_name)
+        {
+            pane.selected = pos;
+        }
+    }
+    match result {
+        Ok(()) => app.notify_info(format!("Renamed to {new_name}")),
+        Err((e, path)) => app.notify_error(fs_error_message(&e, &path)),
     }
 }
 

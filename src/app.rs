@@ -122,10 +122,14 @@ pub struct App {
 
 impl App {
     pub fn new(picker: Picker) -> io::Result<Self> {
-        let cwd = std::env::current_dir()?;
+        Self::with_dir(picker, std::env::current_dir()?)
+    }
+
+    /// Start with both panes in `dir`.
+    pub fn with_dir(picker: Picker, dir: PathBuf) -> io::Result<Self> {
         Ok(Self {
-            left: Pane::new(cwd.clone())?,
-            right: Pane::new(cwd)?,
+            left: Pane::new(dir.clone())?,
+            right: Pane::new(dir)?,
             active: PaneType::Left,
             mode: Mode::Filer,
             clipboard: Vec::new(),
