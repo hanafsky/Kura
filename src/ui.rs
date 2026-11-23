@@ -147,6 +147,10 @@ pub fn ui(f: &mut Frame, app: &mut App) {
         draw_delete_dialog(f, items, *kind);
     }
 
+    if let Mode::PasteConflict { pending } = &app.mode {
+        draw_paste_conflict(f, &pending.planner);
+    }
+
     if let Mode::Sort { selected } = &app.mode {
         let popup = centered_rect(40, 20, f.area());
         let block = Block::default().title("Sort By").borders(Borders::ALL);
@@ -182,6 +186,39 @@ pub fn ui(f: &mut Frame, app: &mut App) {
         let paragraph = Paragraph::new(prompt);
         f.render_widget(paragraph, footer);
     }
+}
+
+/// Collision dialog shown while pasting: names the colliding entry and
+/// lists the answers.
+fn draw_paste_conflict(f: &mut Frame, planner: &crate::paste::Planner) {
+    let Some(item) = planner.current() else {
+        return;
+    };
+    let (pos, total) = planner.progress();
+    let name = item.file_name.to_string_lossy();
+    let kind = if item.is_dir { "folder" } else { "file" };
+    let lines = vec![
+        Line::from(format!("A {kind} named")),
+        Line::from(Span::styled(
+            name.into_owned(),
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from("already exists here."),
+        Line::from(""),
+        Line::from("o: Overwrite   s: Skip   b: Keep both"),
+        Line::from("O / S / B: apply to all remaining"),
+        Line::from("Esc: cancel paste"),
+    ];
+    let popup = centered_rect(50, 40, f.area());
+    let block = Block::default()
+        .title(format!(" Already exists ({pos}/{total}) "))
+        .borders(Borders::ALL);
+    let paragraph = Paragraph::new(lines)
+        .block(block)
+        .alignment(Alignment::Center)
+        .wrap(ratatui::widgets::Wrap { trim: false });
+    f.render_widget(Clear, popup);
+    f.render_widget(paragraph, popup);
 }
 
 /// Bottom status line: the latest message on the left, cursor position and

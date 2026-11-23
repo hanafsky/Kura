@@ -3,12 +3,13 @@ use ratatui::{backend::Backend, Terminal};
 use std::time::Duration;
 use std::{fs, io, io::Write, path::PathBuf};
 
-use crate::actions::{copy_selection, delete_items, paste, toggle_mark};
+use crate::actions::{copy_selection, delete_items, paste, resolve_paste_conflict, toggle_mark};
 use crate::app::{fs_error_message, App};
 use crate::delete_confirm::{confirm_key, ConfirmAction, DeleteKind};
-use crate::fs_utils::{apply_sort, find_match, SortBy, SORT_OPTIONS};
+use crate::fs_utils::{apply_sort, ensure_rename_target_free, find_match, SortBy, SORT_OPTIONS};
 use crate::media::open_external;
 use crate::mode::{Mode, PaneType};
+use crate::paste::conflict_choice;
 
 /// Paths to act on: the marked entries (in list order), or the entry under
 /// the cursor when nothing is marked.
@@ -44,8 +45,11 @@ pub fn run_app<B: Backend<Error = io::Error> + Write>(
                 app.message = None;
                 // Text-input modes must receive every character (including 'q', 'g', 'G').
                 let text_input = matches!(app.mode, Mode::Search { .. } | Mode::Rename { .. });
-                // In the delete dialog 'q' cancels instead of quitting.
-                let in_dialog = matches!(app.mode, Mode::ConfirmDelete { .. });
+                // In dialogs 'q' never quits (the delete dialog treats it as cancel).
+                let in_dialog = matches!(
+                    app.mode,
+                    Mode::ConfirmDelete { .. } | Mode::PasteConflict { .. }
+                );
                 if key.code == KeyCode::Char('q') && !text_input && !in_dialog {
                     return Ok(());
                 }
@@ -220,7 +224,10 @@ pub fn run_app<B: Backend<Error = io::Error> + Write>(
                     let pane = app.current_pane_mut();
                     let old = pane.items[pane.selected].path();
                     let newp = old.with_file_name(&new_name);
-                    let result = fs::rename(&old, &newp);
+                    // Unix `rename` silently replaces an existing entry; refuse instead.
+                    let result = ensure_rename_target_free(&old, &newp)
+                        .map_err(|e| (e, newp.clone()))
+                        .and_then(|()| fs::rename(&old, &newp).map_err(|e| (e, old.clone())));
                     if pane.refresh().is_ok() {
                         if let Some(pos) = pane
                             .items
@@ -232,7 +239,7 @@ pub fn run_app<B: Backend<Error = io::Error> + Write>(
                     }
                     match result {
                         Ok(()) => app.notify_info(format!("Renamed to {new_name}")),
-                        Err(e) => app.notify_error(fs_error_message(&e, &old)),
+                        Err((e, path)) => app.notify_error(fs_error_message(&e, &path)),
                     }
                     continue;
                 }
@@ -240,6 +247,14 @@ pub fn run_app<B: Backend<Error = io::Error> + Write>(
                 // Commit sort
                 if let Some(by) = sort_choice {
                     apply_sort(app.current_pane_mut(), by);
+                    continue;
+                }
+
+                // Paste collision dialog
+                if matches!(app.mode, Mode::PasteConflict { .. }) {
+                    if let Some(choice) = conflict_choice(key.code) {
+                        resolve_paste_conflict(app, choice);
+                    }
                     continue;
                 }
 
@@ -340,14 +355,7 @@ pub fn run_app<B: Backend<Error = io::Error> + Write>(
                         KeyCode::Char('y') => {
                             copy_selection(app);
                         }
-                        KeyCode::Char('p') => {
-                            let n = app.clipboard.len();
-                            let dst_dir = app.current_pane().current_dir.clone();
-                            match paste(app) {
-                                Ok(()) => app.notify_info(format!("Pasted {n} item(s)")),
-                                Err(e) => app.notify_error(fs_error_message(&e, &dst_dir)),
-                            }
-                        }
+                        KeyCode::Char('p') => paste(app),
                         _ => {}
                     },
                     _ => {}

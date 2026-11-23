@@ -39,4 +39,9 @@ pub enum Mode {
     /// Image/video preview shown in the pane opposite to the active one
     /// (content lives in `App::preview`).
     Preview,
+    /// Paste collision dialog: an entry with the same name already exists
+    /// in the destination (Overwrite / Skip / Keep both).
+    PasteConflict {
+        pending: crate::paste::PendingPaste,
+    },
 }

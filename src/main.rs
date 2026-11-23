@@ -7,6 +7,7 @@ mod input;
 mod input_source;
 mod media;
 mod mode;
+mod paste;
 mod ui;
 
 use app::App;
