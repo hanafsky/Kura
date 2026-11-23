@@ -10,7 +10,10 @@ use crate::media::open_external;
 use crate::mode::{Mode, PaneType};
 
 /// Main event loop: handles input and dispatches actions.
-pub fn run_app<B: Backend<Error = io::Error> + Write>(terminal: &mut Terminal<B>, app: &mut App) -> io::Result<()> {
+pub fn run_app<B: Backend<Error = io::Error> + Write>(
+    terminal: &mut Terminal<B>,
+    app: &mut App,
+) -> io::Result<()> {
     let mut prefix: usize = 0;
     let mut last_key_g = false;
     loop {
@@ -279,9 +282,8 @@ pub fn run_app<B: Backend<Error = io::Error> + Write>(terminal: &mut Terminal<B>
                             delete_items(app, &items);
                         }
                         KeyCode::Enter => {
-                            let previewed = app
-                                .selected_path()
-                                .is_some_and(|p| app.open_preview(&p));
+                            let previewed =
+                                app.selected_path().is_some_and(|p| app.open_preview(&p));
                             if !previewed {
                                 app.on_enter();
                             }

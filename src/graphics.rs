@@ -21,7 +21,10 @@ pub fn detect() -> (Picker, String) {
         Err(e) => (Picker::halfblocks(), Some(format!("query failed: {e:?}"))),
     };
 
-    if let Some(forced) = std::env::var(PROTOCOL_ENV).ok().and_then(|v| parse_protocol(&v)) {
+    if let Some(forced) = std::env::var(PROTOCOL_ENV)
+        .ok()
+        .and_then(|v| parse_protocol(&v))
+    {
         picker.set_protocol_type(forced);
         note = Some(format!("forced by {PROTOCOL_ENV}"));
     } else if picker.protocol_type() == ProtocolType::Halfblocks && has_cell_size(&picker) {

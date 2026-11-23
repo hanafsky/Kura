@@ -2,8 +2,7 @@
 //! opening files in the OS default application.
 
 use std::{
-    fs,
-    io,
+    fs, io,
     path::Path,
     process::{Command, Stdio},
 };
@@ -33,7 +32,16 @@ pub fn is_image(path: &Path) -> bool {
     matches!(
         ext_lower(path).as_deref(),
         Some(
-            "png" | "jpg" | "jpeg" | "gif" | "bmp" | "tiff" | "tif" | "webp" | "heic" | "heif"
+            "png"
+                | "jpg"
+                | "jpeg"
+                | "gif"
+                | "bmp"
+                | "tiff"
+                | "tif"
+                | "webp"
+                | "heic"
+                | "heif"
                 | "avif"
         )
     )
@@ -43,8 +51,19 @@ pub fn is_video(path: &Path) -> bool {
     matches!(
         ext_lower(path).as_deref(),
         Some(
-            "mp4" | "m4v" | "mov" | "mkv" | "webm" | "avi" | "wmv" | "flv" | "mts" | "m2ts"
-                | "3gp" | "mpg" | "mpeg"
+            "mp4"
+                | "m4v"
+                | "mov"
+                | "mkv"
+                | "webm"
+                | "avi"
+                | "wmv"
+                | "flv"
+                | "mts"
+                | "m2ts"
+                | "3gp"
+                | "mpg"
+                | "mpeg"
         )
     )
 }
@@ -170,7 +189,12 @@ fn get<'a>(pairs: &[(&'a str, &'a str)], key: &str) -> Option<&'a str> {
 
 fn format_duration(secs: f64) -> String {
     let total = secs.round() as u64;
-    format!("{:02}:{:02}:{:02}", total / 3600, (total / 60) % 60, total % 60)
+    format!(
+        "{:02}:{:02}:{:02}",
+        total / 3600,
+        (total / 60) % 60,
+        total % 60
+    )
 }
 
 fn fps(rate: &str) -> Option<f64> {

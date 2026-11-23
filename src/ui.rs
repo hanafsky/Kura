@@ -31,19 +31,18 @@ pub fn ui(f: &mut Frame, app: &mut App) {
     .alignment(Alignment::Center);
     f.render_widget(header, chunks[0]);
 
-    let (content_area, footer_area) =
-        if matches!(
-            app.mode,
-            Mode::Search { .. } | Mode::Rename { .. } | Mode::Preview
-        ) {
-            let v = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Min(0), Constraint::Length(1)])
-                .split(chunks[1]);
-            (v[0], Some(v[1]))
-        } else {
-            (chunks[1], None)
-        };
+    let (content_area, footer_area) = if matches!(
+        app.mode,
+        Mode::Search { .. } | Mode::Rename { .. } | Mode::Preview
+    ) {
+        let v = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(0), Constraint::Length(1)])
+            .split(chunks[1]);
+        (v[0], Some(v[1]))
+    } else {
+        (chunks[1], None)
+    };
 
     if let Mode::Viewer {
         content,
@@ -93,7 +92,7 @@ pub fn ui(f: &mut Frame, app: &mut App) {
         }
         let total_rows = rows.len();
         let max_off = total_rows.saturating_sub(inner_height);
-        let start = (*offset as usize).min(max_off) as usize;
+        let start = (*offset as usize).min(max_off);
         let numbered: Vec<Line> = rows
             .iter()
             .skip(start)
@@ -237,11 +236,7 @@ fn draw_pane(f: &mut Frame, area: Rect, pane: &Pane, active: bool) {
     f.render_stateful_widget(list, area, &mut state);
 }
 
-fn draw_preview(
-    f: &mut Frame,
-    area: Rect,
-    preview: &mut Preview,
-) {
+fn draw_preview(f: &mut Frame, area: Rect, preview: &mut Preview) {
     let block = Block::default().borders(Borders::ALL).title(Span::styled(
         format!(" {} ", preview.title),
         Style::default()
