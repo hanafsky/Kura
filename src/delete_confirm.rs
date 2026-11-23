@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 /// How the confirmed items will be removed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DeleteKind {
-    /// `x`: regular delete.
+    /// `x`: regular delete (currently also permanent; becomes trash in #12).
     Normal,
     /// `X`: permanent delete that cannot be undone.
     Permanent,
@@ -64,9 +64,9 @@ pub fn dialog_lines(items: &[PathBuf], kind: DeleteKind, max_lines: usize) -> Ve
         DeleteKind::Normal => format!("Delete {n} item(s)?"),
         DeleteKind::Permanent => format!("Permanently delete {n} item(s)?"),
     }];
-    if kind == DeleteKind::Permanent {
-        header.push("This cannot be undone.".to_string());
-    }
+    // Both `x` and `X` remove files from disk today, so both warn.
+    // TODO(#12): drop the warning for `x` once it moves items to the trash.
+    header.push("This cannot be undone.".to_string());
     // header + blank + names + blank + prompt
     let fixed = header.len() + 3;
     let room = max_lines.saturating_sub(fixed).min(MAX_LISTED_NAMES);
@@ -160,11 +160,16 @@ mod tests {
     }
 
     #[test]
-    fn permanent_wording_warns() {
+    fn both_kinds_warn_irreversible() {
         let lines = dialog_lines(&paths(1), DeleteKind::Permanent, 100);
         assert_eq!(lines[0], "Permanently delete 1 item(s)?");
         assert_eq!(lines[1], "This cannot be undone.");
         let normal = dialog_lines(&paths(1), DeleteKind::Normal, 100);
-        assert!(!normal.iter().any(|l| l.contains("undone")));
+        assert_eq!(normal[0], "Delete 1 item(s)?");
+        assert_eq!(normal[1], "This cannot be undone.");
+        assert_ne!(
+            dialog_title(DeleteKind::Normal),
+            dialog_title(DeleteKind::Permanent)
+        );
     }
 }

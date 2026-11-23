@@ -107,8 +107,8 @@ sudo apt install ffmpeg
 - `/`: Enter search mode. Type a query to jump to matching entries; press Enter or Esc to exit search.
 - `r`: Rename the selected file; an inline prompt appears at the bottom.
 - `s`: Open a sort popup to choose ordering (modified/created/size/alphabetical).
-- `x`: Delete the selected entry or all marked entries, after confirmation (`y` deletes; `n` / `Esc` / `Enter` / `q` cancel).
-- `X`: Permanently delete the selected entry or all marked entries, after a confirmation that warns it cannot be undone.
+- `x`: Delete the selected entry or all marked entries from disk, after confirmation (`y` deletes; `n` / `Esc` / `Enter` / `q` cancel). This cannot be undone (there is no trash yet).
+- `X`: Same as `x` (permanent deletion from disk, cannot be undone), with a "Confirm Permanent Deletion" dialog. `x` will move items to the trash in a future release.
 - `q`: Quit the application
 
 ## Color Map
