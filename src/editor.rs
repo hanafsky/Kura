@@ -1,4 +1,4 @@
-//! `e`: open a file in `$VISUAL` / `$EDITOR`, suspending the TUI meanwhile.
+//! `e`: open a file or directory in `$VISUAL` / `$EDITOR`, suspending the TUI meanwhile.
 
 use std::io;
 use std::path::Path;

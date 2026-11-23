@@ -39,7 +39,7 @@ pub enum Command {
     Open,
     /// Open the entry under the cursor with the system's default application.
     OpenExternal,
-    /// Open the file under the cursor in `$VISUAL` / `$EDITOR` / `vi`.
+    /// Open the entry (file or directory) under the cursor in `$VISUAL` / `$EDITOR` / `vi`.
     OpenEditor,
     /// Mark / unmark the entry under the cursor.
     ToggleMark,
@@ -147,18 +147,7 @@ impl App {
                     }
                 }
             }
-            Command::OpenEditor if filer => {
-                if let Some(p) = self.selected_path() {
-                    if p.is_dir() {
-                        self.notify_error(format!(
-                            "Cannot edit a directory: {}",
-                            p.file_name().unwrap_or_default().to_string_lossy()
-                        ));
-                    } else {
-                        self.pending_edit = Some(p);
-                    }
-                }
-            }
+            Command::OpenEditor if filer => self.pending_edit = self.selected_path(),
             Command::ToggleMark if filer => toggle_mark(self.current_pane_mut()),
             Command::VisualStart if filer => {
                 let pane = self.current_pane_mut();
@@ -470,19 +459,17 @@ mod tests {
     }
 
     #[test]
-    fn open_editor_requests_the_file_under_the_cursor() {
+    fn open_editor_requests_the_entry_under_the_cursor() {
         let tmp = abcd();
         fs::create_dir(tmp.path().join("dir")).unwrap();
         let mut app = app_in(tmp.path());
-        // Directories are listed first: the cursor starts on "dir".
-        let _ = app.apply(Command::OpenEditor);
-        assert_eq!(app.pending_edit, None);
-        assert!(app
-            .message
-            .as_ref()
-            .is_some_and(|m| m.level == MessageLevel::Error && m.text.contains("dir")));
-        let _ = app.apply(Command::MoveDown(1));
+        // Directories are listed first: the cursor starts on "dir", which
+        // is opened in the editor too (e.g. Vim's netrw).
         assert!(app.apply(Command::OpenEditor).is_continue());
+        assert_eq!(app.pending_edit, Some(tmp.path().join("dir")));
+        app.pending_edit = None;
+        let _ = app.apply(Command::MoveDown(1));
+        let _ = app.apply(Command::OpenEditor);
         assert_eq!(app.pending_edit, Some(tmp.path().join("a")));
     }
 
