@@ -67,6 +67,8 @@ pub enum Command {
     SearchConfirm,
     /// Open the sort menu.
     SortMenu,
+    /// Show only entries with git changes in the current pane, or all again.
+    ToggleGitFilter,
     /// Sort by the highlighted option.
     SortConfirm,
     /// Type a character into the search query or rename buffer.
@@ -188,6 +190,7 @@ impl App {
                 }
             }
             Command::SortMenu if filer => self.mode = Mode::Sort { selected: 0 },
+            Command::ToggleGitFilter if filer => self.toggle_git_filter(),
             Command::SortConfirm => {
                 if let Mode::Sort { selected } = self.mode {
                     self.mode = Mode::Filer;
@@ -781,5 +784,57 @@ mod tests {
         let _ = app.apply(Command::SortMenu);
         let _ = app.apply(Command::CopyAtPaths);
         assert_eq!(last_copy(), None);
+    }
+
+    /// Run git in `dir` for test setup; returns false if git is unavailable.
+    fn git(dir: &Path, args: &[&str]) -> bool {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_WORK_TREE")
+            .output()
+            .is_ok_and(|o| o.status.success())
+    }
+
+    #[test]
+    fn toggle_git_filter_shows_changed_entries_only() {
+        let tmp = abcd();
+        if !git(tmp.path(), &["init", "-q", "-b", "main"]) {
+            return;
+        }
+        assert!(git(tmp.path(), &["add", "."]));
+        assert!(git(tmp.path(), &["commit", "-qm", "init"]));
+        fs::write(tmp.path().join("c"), "changed").unwrap();
+        let mut app = app_in(tmp.path());
+        let _ = app.apply(Command::ToggleGitFilter);
+        assert!(app.current_pane().git_filter_active());
+        assert_eq!(selected_name(&app), "c");
+        assert_eq!(app.current_pane().items.len(), 1);
+        // Ignored outside the file list.
+        let _ = app.apply(Command::SortMenu);
+        let _ = app.apply(Command::ToggleGitFilter);
+        let _ = app.apply(Command::Back);
+        assert!(app.current_pane().git_filter_active());
+        let _ = app.apply(Command::ToggleGitFilter);
+        assert!(!app.current_pane().git_filter_active());
+        assert_eq!(app.current_pane().items.len(), 5); // .git, a, b, c, d
+    }
+
+    #[test]
+    fn toggle_git_filter_outside_repo_reports_it() {
+        let tmp = abcd();
+        let mut app = app_in(tmp.path());
+        if app.current_pane().git.is_some() {
+            return; // the temp dir sits inside a repository on this machine
+        }
+        let _ = app.apply(Command::ToggleGitFilter);
+        assert!(!app.current_pane().git_filter);
+        assert_eq!(app.current_pane().items.len(), 4);
+        let msg = app.message.as_ref().unwrap();
+        assert_eq!(msg.text, "Not a git repository");
     }
 }

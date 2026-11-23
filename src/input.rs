@@ -35,6 +35,7 @@ const FILER_KEYS: Bindings = &[
     (KeyCode::Char('r'), Command::RenameStart),
     (KeyCode::Char('/'), Command::SearchStart),
     (KeyCode::Char('s'), Command::SortMenu),
+    (KeyCode::Char('M'), Command::ToggleGitFilter),
 ];
 
 /// Visual (range) selection.
@@ -244,6 +245,8 @@ mod tests {
         assert_eq!(run(&f, &[ch('x')]), [Command::Delete(DeleteKind::Normal)]);
         assert_eq!(run(&f, &[ch('p')]), [Command::Paste]);
         assert_eq!(run(&f, &[ch('Y')]), [Command::CopyAtPaths]);
+        assert_eq!(run(&f, &[ch('M')]), [Command::ToggleGitFilter]);
+        assert_eq!(run(&search(), &[ch('M')]), [Command::InsertChar('M')]);
         assert_eq!(run(&f, &[ch('z')]), []);
         assert_eq!(run(&f, &[KeyCode::Down]), []);
     }

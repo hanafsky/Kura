@@ -4,6 +4,7 @@ mod clipboard;
 mod command;
 mod delete_confirm;
 mod fs_utils;
+mod git;
 mod graphics;
 mod input;
 mod input_source;

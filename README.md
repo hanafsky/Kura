@@ -106,6 +106,7 @@ sudo apt install ffmpeg
 - `p`: Paste copied entries into the current directory.
 - `Y`: Copy the current entry or all marked entries to the system clipboard as `@path` references for coding agents such as Claude Code (e.g. `@src/main.rs @"docs/my notes.md"`). Paths are relative to the directory kura was started in (paths outside it stay absolute), separated by spaces; a path containing spaces is quoted as `@"..."`.
   The text is sent with the OSC 52 escape sequence (so it works through tmux, herdr, or ssh). Because kura cannot tell whether the terminal accepted OSC 52, it is also written with `pbcopy` (macOS), `wl-copy` / `xclip` (Linux), or `clip.exe` (WSL), unless kura runs over ssh (`SSH_CONNECTION` / `SSH_TTY` / `SSH_CLIENT` set), where only OSC 52 is used. Inside tmux, enable `set -g set-clipboard on` in `~/.tmux.conf`. `KURA_CLIPBOARD` accepts `auto` (default, as above), `osc52` (OSC 52 only), or `native` (native tools only); set `KURA_AT_PATH=absolute` to always copy absolute paths.
+- `M`: Toggle showing only entries with git changes (and directories containing them) in the current pane.
 - `/`: Enter search mode. Type a query to jump to matching entries; press Enter or Esc to exit search.
 - `r`: Rename the selected file; an inline prompt appears at the bottom.
 - `s`: Open a sort popup to choose ordering (modified/created/size/alphabetical). The chosen order is kept per pane, also when moving to another directory. The last row, `Directories first: on/off`, toggles listing directories before files (on by default).
@@ -120,6 +121,8 @@ sudo apt install ffmpeg
 - **Red**: Hidden items (files or directories starting with `.`)
 - **Green**: Executable files
 - Others: Default color
+
+Inside a git repository, a status symbol is shown before each name: `M` modified, `A` added, `D` deleted (deleted files have no row; their directory gets `+`), `R` renamed, `U` conflicted, `?` untracked, `!` ignored, `+` directory containing changes. The current branch is shown in the status line. The status is read when a directory is loaded (moving, paste, delete, rename), not continuously.
 
 ## Usage
 

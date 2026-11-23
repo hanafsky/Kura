@@ -11,6 +11,7 @@ use ratatui_image::{Resize, StatefulImage};
 use crate::{
     app::{App, MessageLevel, Pane},
     delete_confirm::{dialog_lines, dialog_title, DeleteKind},
+    git::FileStatus,
     media::Preview,
     mode::Mode,
     mode::PaneType,
@@ -248,6 +249,10 @@ fn draw_status_line(f: &mut Frame, area: Rect, app: &App) {
     if marked > 0 {
         info = format!("{marked} selected  {info}");
     }
+    if let Some(git) = &pane.git {
+        let branch = git.branch.as_deref().unwrap_or("(detached)");
+        info = format!("git:{branch}  {info}");
+    }
     let info_width = (UnicodeWidthStr::width(info.as_str()) as u16).min(area.width);
     let parts = Layout::default()
         .direction(Direction::Horizontal)
@@ -271,8 +276,24 @@ fn draw_status_line(f: &mut Frame, area: Rect, app: &App) {
     );
 }
 
+/// Color of a git status symbol.
+fn git_status_style(status: FileStatus) -> Style {
+    let color = match status {
+        FileStatus::Modified | FileStatus::DirtyDir => Color::Yellow,
+        FileStatus::Added => Color::Green,
+        FileStatus::Deleted | FileStatus::Conflicted => Color::Red,
+        FileStatus::Renamed => Color::Cyan,
+        FileStatus::Untracked => Color::Magenta,
+        FileStatus::Ignored => Color::DarkGray,
+    };
+    Style::default().fg(color)
+}
+
 fn draw_pane(f: &mut Frame, area: Rect, pane: &Pane, active: bool) {
-    let title = format!(" {} ", pane.current_dir.display());
+    let mut title = format!(" {} ", pane.current_dir.display());
+    if pane.git_filter_active() {
+        title.push_str("[changed only] ");
+    }
     let block = Block::default().borders(Borders::ALL).title(Span::styled(
         title,
         Style::default()
@@ -314,10 +335,16 @@ fn draw_pane(f: &mut Frame, area: Rect, pane: &Pane, active: bool) {
             } else {
                 " "
             };
-            ListItem::new(Line::from(vec![
-                Span::raw(format!("{marker} ")),
-                Span::styled(name, style),
-            ]))
+            let mut spans = vec![Span::raw(format!("{marker} "))];
+            // The status column only appears inside a repository.
+            if pane.git.is_some() {
+                spans.push(match pane.git_status_of(e) {
+                    Some(s) => Span::styled(format!("{} ", s.symbol()), git_status_style(s)),
+                    None => Span::raw("  "),
+                });
+            }
+            spans.push(Span::styled(name, style));
+            ListItem::new(Line::from(spans))
         })
         .collect();
     let mut state = ListState::default();
