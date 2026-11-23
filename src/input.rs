@@ -4,7 +4,7 @@ use std::time::Duration;
 use std::{fs, io, io::Write, path::PathBuf};
 
 use crate::actions::{copy_selection, delete_items, paste, toggle_mark};
-use crate::app::App;
+use crate::app::{fs_error_message, App};
 use crate::fs_utils::{apply_sort, find_match, SortBy, SORT_OPTIONS};
 use crate::media::open_external;
 use crate::mode::{Mode, PaneType};
@@ -210,11 +210,7 @@ pub fn run_app<B: Backend<Error = io::Error> + Write>(
                     }
                     match result {
                         Ok(()) => app.notify_info(format!("Renamed to {new_name}")),
-                        Err(e) => app.notify_error(format!(
-                            "Failed to rename {} to {}: {e}",
-                            old.display(),
-                            newp.display()
-                        )),
+                        Err(e) => app.notify_error(fs_error_message(&e, &old)),
                     }
                     continue;
                 }
@@ -248,10 +244,7 @@ pub fn run_app<B: Backend<Error = io::Error> + Write>(
                         KeyCode::Char('o') => {
                             if let Some(p) = app.selected_path() {
                                 if let Err(e) = open_external(&p) {
-                                    app.notify_error(format!(
-                                        "Failed to open {}: {e}",
-                                        p.display()
-                                    ));
+                                    app.notify_error(fs_error_message(&e, &p));
                                 }
                             }
                         }
@@ -304,10 +297,7 @@ pub fn run_app<B: Backend<Error = io::Error> + Write>(
                         KeyCode::Char('o') => {
                             if let Some(p) = app.selected_path() {
                                 if let Err(e) = open_external(&p) {
-                                    app.notify_error(format!(
-                                        "Failed to open {}: {e}",
-                                        p.display()
-                                    ));
+                                    app.notify_error(fs_error_message(&e, &p));
                                 }
                             }
                         }
@@ -352,9 +342,10 @@ pub fn run_app<B: Backend<Error = io::Error> + Write>(
                         }
                         KeyCode::Char('p') => {
                             let n = app.clipboard.len();
+                            let dst_dir = app.current_pane().current_dir.clone();
                             match paste(app) {
                                 Ok(()) => app.notify_info(format!("Pasted {n} item(s)")),
-                                Err(e) => app.notify_error(format!("Failed to paste: {e}")),
+                                Err(e) => app.notify_error(fs_error_message(&e, &dst_dir)),
                             }
                         }
                         _ => {}

@@ -75,6 +75,24 @@ impl Pane {
     }
 }
 
+/// Format a filesystem error for the status line: the reason comes first and
+/// only the last path component is shown, so the reason is not cut off at the
+/// right edge by a long path. e.g. `Permission denied: a_locked`.
+pub fn fs_error_message(err: &io::Error, path: &Path) -> String {
+    let mut reason = err.to_string();
+    // Drop the trailing " (os error N)" that std appends to OS errors.
+    if let Some(idx) = reason.rfind(" (os error ") {
+        if reason.ends_with(')') {
+            reason.truncate(idx);
+        }
+    }
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string());
+    format!("{reason}: {name}")
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum MessageLevel {
     Info,
@@ -175,9 +193,9 @@ impl App {
             let target = pane
                 .current_dir
                 .parent()
-                .map(|p| p.display().to_string())
+                .map(Path::to_path_buf)
                 .unwrap_or_default();
-            self.notify_error(format!("Cannot open {target}: {e}"));
+            self.notify_error(fs_error_message(&e, &target));
         }
     }
 
@@ -214,7 +232,7 @@ impl App {
         };
         if path.is_dir() {
             if let Err(e) = pane.change_dir(path.clone()) {
-                self.notify_error(format!("Cannot open {}: {e}", path.display()));
+                self.notify_error(fs_error_message(&e, &path));
             }
             return;
         }
@@ -230,7 +248,7 @@ impl App {
                     offset: 0,
                 };
             }
-            Err(e) => self.notify_error(format!("Cannot view {}: {e}", path.display())),
+            Err(e) => self.notify_error(fs_error_message(&e, &path)),
         }
     }
 }
@@ -300,6 +318,20 @@ mod tests {
 
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fs_error_message_puts_reason_first_with_file_name_only() {
+        let err = io::Error::from_raw_os_error(libc::EACCES);
+        let msg = fs_error_message(&err, Path::new("/very/long/path/to/a_locked"));
+        assert_eq!(msg, "Permission denied: a_locked");
+    }
+
+    #[test]
+    fn fs_error_message_keeps_custom_reason() {
+        let custom = io::Error::new(io::ErrorKind::InvalidInput, "bad input");
+        assert_eq!(fs_error_message(&custom, Path::new("/")), "bad input: /");
     }
 
     #[test]
