@@ -436,7 +436,10 @@ impl App {
             self.notify_error(fs_error_message(&e, &dir));
             return;
         }
-        let text = if pane.hide_ignored {
+        let text = if pane.hide_ignored && !pane.ignore_filter_active() {
+            // Everything here is ignored, so the filter hides nothing.
+            "Already inside an ignored directory"
+        } else if pane.hide_ignored {
             "Hiding git-ignored files"
         } else {
             "Showing git-ignored files"

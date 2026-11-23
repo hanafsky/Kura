@@ -1049,6 +1049,10 @@ mod tests {
         assert!(app.current_pane().hide_ignored);
         assert!(!app.current_pane().ignore_filter_active());
         assert_eq!(names(&app), ["out"]);
+        assert_eq!(
+            app.message.as_ref().unwrap().text,
+            "Already inside an ignored directory"
+        );
         let _ = app.apply(Command::MoveLeft);
         assert!(!names(&app).contains(&"target".to_string()));
 
