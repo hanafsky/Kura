@@ -2,6 +2,7 @@ use std::{
     collections::HashSet,
     fs, io,
     path::{Path, PathBuf},
+    time::{Duration, SystemTime},
 };
 
 use ratatui_image::picker::Picker;
@@ -10,6 +11,7 @@ use crate::fs_utils::{sort_entries, SortBy};
 use crate::git::{self, FileStatus, GitStatus};
 use crate::media::{self, Preview};
 use crate::mode::{Mode, PaneType};
+use crate::watch::{self, FsEvent};
 
 pub struct Pane {
     pub items: Vec<fs::DirEntry>,
@@ -304,6 +306,8 @@ pub struct App {
     /// File to open in `$EDITOR` once the event loop gets control back
     /// (set by `e`; the loop owns the terminal, so it runs the editor).
     pub pending_edit: Option<PathBuf>,
+    /// When kura started; files changed after it are highlighted.
+    pub session_start: SystemTime,
 }
 
 impl App {
@@ -334,6 +338,7 @@ impl App {
             launch_dir,
             last_search: None,
             pending_edit: None,
+            session_start: SystemTime::now(),
         })
     }
 
@@ -457,6 +462,114 @@ impl App {
             "Showing git-ignored files"
         };
         self.notify_info(text);
+    }
+
+    /// Directories the watcher should follow (both panes, once if equal).
+    /// A shown directory that was removed is dropped, so the watcher does
+    /// not keep reporting it (it is watched again once it exists).
+    pub fn watch_targets(&self) -> Vec<PathBuf> {
+        let mut targets = watch::watch_targets(&self.left.current_dir, &self.right.current_dir);
+        targets.retain(|d| d.is_dir());
+        targets
+    }
+
+    /// React to a change reported by the directory watcher: re-read the
+    /// panes showing an affected directory (cursor, marks and the Visual
+    /// range stay on the same files; the git status is re-read too).
+    pub fn handle_fs_event(&mut self, event: &FsEvent) {
+        let (left, right) = match event {
+            FsEvent::Changed(paths) => (
+                watch::affects_dir(paths, &watch::dir_keys(&self.left.current_dir)),
+                watch::affects_dir(paths, &watch::dir_keys(&self.right.current_dir)),
+            ),
+            FsEvent::Rescan => (true, true),
+            FsEvent::Error(e) => {
+                self.notify_error(format!("Watch error: {e}"));
+                return;
+            }
+        };
+        self.refresh_panes(left, right);
+    }
+
+    /// Re-read both panes by hand (`R`), e.g. with `KURA_WATCH=off`.
+    pub fn refresh_all(&mut self) {
+        if self.refresh_panes(true, true) {
+            self.notify_info("Refreshed");
+        }
+    }
+
+    /// Re-read the chosen panes, keeping cursor, marks and the Visual
+    /// range on the same files. Reports the first error; returns whether
+    /// all succeeded.
+    fn refresh_panes(&mut self, left: bool, right: bool) -> bool {
+        let mut first_err = None;
+        for (hit, pane) in [(left, &mut self.left), (right, &mut self.right)] {
+            if hit {
+                if let Err(e) = pane.refresh() {
+                    first_err.get_or_insert_with(|| fs_error_message(&e, &pane.current_dir));
+                }
+            }
+        }
+        let ok = first_err.is_none();
+        if let Some(msg) = first_err {
+            self.notify_error(msg);
+        }
+        self.update_visual_marks();
+        self.cancel_rename_if_target_gone();
+        ok
+    }
+
+    /// Renaming acts on the entry under the cursor; if a refresh moved the
+    /// cursor off the file being renamed (it was removed or renamed from
+    /// outside), stop instead of renaming another file.
+    fn cancel_rename_if_target_gone(&mut self) {
+        let Mode::Rename { original, .. } = &self.mode else {
+            return;
+        };
+        let pane = self.current_pane();
+        let still_there = pane
+            .items
+            .get(pane.selected)
+            .is_some_and(|e| e.file_name().to_string_lossy() == original.as_str());
+        if !still_there {
+            let text = format!("Rename cancelled: {original} is gone");
+            self.mode = Mode::Filer;
+            self.notify_error(text);
+        }
+    }
+
+    /// In Visual mode, mark the range between the anchor and the cursor.
+    /// If the anchor file is gone, the selection restarts at the cursor.
+    pub fn update_visual_marks(&mut self) {
+        let Mode::Visual { anchor } = &self.mode else {
+            return;
+        };
+        let anchor = anchor.clone();
+        let pane = self.current_pane_mut();
+        let end = pane.selected;
+        let start = match pane.items.iter().position(|e| e.path() == anchor) {
+            Some(i) => i,
+            None => {
+                if let Some(p) = pane.selected_path() {
+                    self.mode = Mode::Visual { anchor: p };
+                }
+                end
+            }
+        };
+        let pane = self.current_pane_mut();
+        pane.marked.clear();
+        for i in start.min(end)..=start.max(end) {
+            pane.mark_index(i);
+        }
+    }
+
+    /// Time until a "just changed" highlight in either pane expires.
+    pub fn next_highlight_expiry(&self, now: SystemTime) -> Option<Duration> {
+        let mtimes = [&self.left, &self.right]
+            .into_iter()
+            .flat_map(|p| p.items.iter())
+            .filter_map(|e| e.metadata().and_then(|m| m.modified()).ok());
+        watch::next_expiry(mtimes, now, self.session_start)
     }
 
     /// Path of the entry under the cursor in the active pane.

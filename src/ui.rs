@@ -15,7 +15,9 @@ use crate::{
     media::Preview,
     mode::Mode,
     mode::PaneType,
+    watch::{self, Recency},
 };
+use std::time::SystemTime;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 pub fn ui(f: &mut Frame, app: &mut App) {
@@ -142,12 +144,12 @@ pub fn ui(f: &mut Frame, app: &mut App) {
                     (panes[1], panes[0])
                 };
                 let pane = if left_active { &app.left } else { &app.right };
-                draw_pane(f, pane_area, pane, true);
+                draw_pane(f, pane_area, pane, true, app.session_start);
                 draw_preview(f, preview_area, preview);
             }
             _ => {
-                draw_pane(f, panes[0], &app.left, left_active);
-                draw_pane(f, panes[1], &app.right, !left_active);
+                draw_pane(f, panes[0], &app.left, left_active, app.session_start);
+                draw_pane(f, panes[1], &app.right, !left_active, app.session_start);
             }
         }
     }
@@ -309,7 +311,19 @@ fn git_status_style(status: FileStatus) -> Style {
     Style::default().fg(color)
 }
 
-fn draw_pane(f: &mut Frame, area: Rect, pane: &Pane, active: bool) {
+/// Extra style for a file changed recently (keeps the type colour).
+fn recency_style(recency: Option<Recency>) -> Style {
+    match recency {
+        Some(Recency::Recent) => Style::default()
+            .bg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD),
+        Some(Recency::SinceStart) => Style::default().add_modifier(Modifier::UNDERLINED),
+        None => Style::default(),
+    }
+}
+
+fn draw_pane(f: &mut Frame, area: Rect, pane: &Pane, active: bool, session_start: SystemTime) {
+    let now = SystemTime::now();
     let mut title = format!(" {} ", pane.current_dir.display());
     if pane.git_filter_active() {
         title.push_str("[changed only] ");
@@ -369,7 +383,12 @@ fn draw_pane(f: &mut Frame, area: Rect, pane: &Pane, active: bool) {
                     None => Span::raw("  "),
                 });
             }
-            spans.push(Span::styled(name, style));
+            let recency = e
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|m| watch::classify(m, now, session_start));
+            spans.push(Span::styled(name, style.patch(recency_style(recency))));
             ListItem::new(Line::from(spans))
         })
         .collect();
@@ -507,7 +526,8 @@ mod tests {
         let mut pane = Pane::new(tmp.path().to_path_buf()).unwrap();
         let title = |pane: &Pane| {
             let mut term = Terminal::new(TestBackend::new(200, 3)).unwrap();
-            term.draw(|f| draw_pane(f, f.area(), pane, true)).unwrap();
+            term.draw(|f| draw_pane(f, f.area(), pane, true, SystemTime::now()))
+                .unwrap();
             let buf = term.backend().buffer();
             (0..200).map(|x| buf[(x, 0)].symbol()).collect::<String>()
         };
