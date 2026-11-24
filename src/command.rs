@@ -10,8 +10,9 @@ use crate::actions::{
     copy_selection, delete_items, paste, rename_selected, resolve_paste_conflict, target_paths,
     toggle_mark,
 };
-use crate::app::{fs_error_message, App};
+use crate::app::{fs_error_message, App, Pane};
 use crate::delete_confirm::DeleteKind;
+use crate::diff;
 use crate::fs_utils::{apply_sort, find_match, SearchFrom, SortBy, DIRS_FIRST_ROW, SORT_MENU_ROWS};
 use crate::media::open_external;
 use crate::mode::{Mode, PaneType};
@@ -76,6 +77,9 @@ pub enum Command {
     ToggleHidden,
     /// Hide or show entries ignored by git in the current pane.
     ToggleIgnored,
+    /// Show the diff between the files under the cursors of both panes
+    /// (or of the active file against HEAD).
+    Diff,
     /// Sort by the highlighted option.
     SortConfirm,
     /// Type a character into the search query or rename buffer.
@@ -202,6 +206,7 @@ impl App {
             Command::ToggleGitFilter if filer => self.toggle_git_filter(),
             Command::ToggleHidden if filer => self.toggle_hidden(),
             Command::ToggleIgnored if filer => self.toggle_ignored(),
+            Command::Diff if filer => self.show_diff(),
             Command::SortConfirm => {
                 if let Mode::Sort { selected } = self.mode {
                     self.mode = Mode::Filer;
@@ -309,6 +314,37 @@ impl App {
         }
     }
 
+    /// `D`: diff the entries under the cursors of both panes and show it in
+    /// the viewer, or report why there is nothing to diff.
+    fn show_diff(&mut self) {
+        let active_is_left = self.active == PaneType::Left;
+        let (active, other) = if active_is_left {
+            (&self.left, &self.right)
+        } else {
+            (&self.right, &self.left)
+        };
+        let plan = diff::plan(&diff_target(active), &diff_target(other), active_is_left);
+        if let diff::Plan::Reason(reason) = plan {
+            self.notify_info(reason);
+            return;
+        }
+        match diff::run(&plan) {
+            diff::Outcome::Diff(content) => {
+                self.mode = Mode::Viewer {
+                    content,
+                    title: diff::title(&plan),
+                    offset: 0,
+                    diff: true,
+                };
+            }
+            diff::Outcome::Same => self.notify_info(match plan {
+                diff::Plan::Head(_) => "No changes against HEAD",
+                _ => "Files are identical",
+            }),
+            diff::Outcome::Error(e) => self.notify_error(e),
+        }
+    }
+
     /// Move the cursor to an entry matching the search query being typed.
     fn search_step(&mut self, from: SearchFrom) {
         let Mode::Search { query } = &self.mode else {
@@ -350,6 +386,20 @@ fn entry_names(pane: &crate::app::Pane) -> Vec<String> {
         .iter()
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .collect()
+}
+
+/// What the cursor of `pane` is on, for [`diff::plan`].
+fn diff_target(pane: &Pane) -> diff::Target {
+    let Some(path) = pane.selected_path() else {
+        return diff::Target::None;
+    };
+    if path.is_dir() {
+        return diff::Target::Dir;
+    }
+    diff::Target::File {
+        path: std::fs::canonicalize(&path).unwrap_or(path),
+        in_repo: pane.git.is_some(),
+    }
 }
 
 #[cfg(test)]
@@ -1074,5 +1124,111 @@ mod tests {
         let _ = app.apply(Command::ToggleIgnored);
         assert!(!app.current_pane().hide_ignored);
         assert_eq!(app.message.as_ref().unwrap().text, "Not a git repository");
+    }
+
+    fn diff_content(app: &App) -> &str {
+        match &app.mode {
+            Mode::Viewer {
+                content,
+                diff: true,
+                ..
+            } => content,
+            _ => panic!("not in the diff viewer"),
+        }
+    }
+
+    fn message(app: &App) -> &str {
+        app.message.as_ref().map_or("", |m| m.text.as_str())
+    }
+
+    #[test]
+    fn diff_shows_files_under_both_cursors_left_to_right() {
+        let left = tempfile::tempdir().unwrap();
+        let right = tempfile::tempdir().unwrap();
+        fs::write(left.path().join("a"), "same\nold\n").unwrap();
+        fs::write(right.path().join("a"), "same\nnew\n").unwrap();
+        let mut app = app_in(left.path());
+        app.right.change_dir(right.path().to_path_buf()).unwrap();
+        let _ = app.apply(Command::MoveRight); // focus the right pane
+        let _ = app.apply(Command::Diff);
+        let content = diff_content(&app);
+        assert!(content.contains("\n-old\n"), "{content}");
+        assert!(content.contains("\n+new\n"), "{content}");
+        // Scrolls like the text viewer and closes back to the file list.
+        let _ = app.apply(Command::MoveDown(2));
+        assert!(matches!(app.mode, Mode::Viewer { offset: 2, .. }));
+        let _ = app.apply(Command::Back);
+        assert!(matches!(app.mode, Mode::Filer));
+    }
+
+    #[test]
+    fn diff_reports_same_file_identical_files_and_directories() {
+        let tmp = abcd();
+        let mut app = app_in(tmp.path());
+        if app.current_pane().git.is_some() {
+            return; // the temp dir sits inside a repository on this machine
+        }
+        let _ = app.apply(Command::Diff);
+        assert!(matches!(app.mode, Mode::Filer));
+        assert_eq!(message(&app), diff::SAME_FILE);
+
+        let other = tempfile::tempdir().unwrap();
+        fs::write(other.path().join("a"), "a").unwrap();
+        app.right.change_dir(other.path().to_path_buf()).unwrap();
+        let _ = app.apply(Command::Diff);
+        assert!(matches!(app.mode, Mode::Filer));
+        assert_eq!(message(&app), "Files are identical");
+
+        fs::create_dir(other.path().join("0dir")).unwrap();
+        app.right.refresh().unwrap();
+        app.right.selected = 0;
+        let _ = app.apply(Command::Diff);
+        assert_eq!(message(&app), diff::DIRECTORY);
+    }
+
+    #[test]
+    fn diff_is_ignored_outside_the_file_list() {
+        let left = tempfile::tempdir().unwrap();
+        let right = tempfile::tempdir().unwrap();
+        fs::write(left.path().join("a"), "1").unwrap();
+        fs::write(right.path().join("a"), "2").unwrap();
+        let mut app = app_in(left.path());
+        app.right.change_dir(right.path().to_path_buf()).unwrap();
+        let _ = app.apply(Command::SortMenu);
+        let _ = app.apply(Command::Diff);
+        assert!(matches!(app.mode, Mode::Sort { .. }));
+    }
+
+    #[test]
+    fn diff_of_repo_file_against_directory_or_itself_is_against_head() {
+        let tmp = abcd();
+        if !git(tmp.path(), &["init", "-q", "-b", "main"]) {
+            return;
+        }
+        assert!(git(tmp.path(), &["add", "."]));
+        assert!(git(tmp.path(), &["commit", "-qm", "init"]));
+        fs::write(tmp.path().join("a"), "changed\n").unwrap();
+        let mut app = app_in(tmp.path());
+        // The right pane's cursor is on `.git`, a directory.
+        assert_eq!(app.right.selected_path().unwrap(), tmp.path().join(".git"));
+        let _ = app.apply(Command::MoveDown(1)); // a
+        let _ = app.apply(Command::Diff);
+        let content = diff_content(&app);
+        assert!(content.contains("\n-a"), "{content}");
+        assert!(content.contains("\n+changed\n"), "{content}");
+
+        // Both panes on the same file: also against HEAD.
+        let _ = app.apply(Command::Back);
+        app.right.selected = 1; // a
+        let _ = app.apply(Command::Diff);
+        assert!(diff_content(&app).contains("\n+changed\n"));
+
+        // An unchanged file has nothing to show.
+        let _ = app.apply(Command::Back);
+        app.right.selected = 0; // .git
+        let _ = app.apply(Command::MoveDown(1)); // b
+        let _ = app.apply(Command::Diff);
+        assert!(matches!(app.mode, Mode::Filer));
+        assert_eq!(message(&app), "No changes against HEAD");
     }
 }

@@ -18,6 +18,9 @@ pub enum Mode {
         content: String,
         title: String,
         offset: u16,
+        /// Showing `git diff` output (`D`): lines are coloured and
+        /// `q` / `Esc` close the viewer instead of quitting.
+        diff: bool,
     },
     ConfirmDelete {
         items: Vec<PathBuf>,

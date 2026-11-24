@@ -59,6 +59,7 @@ pub fn ui(f: &mut Frame, app: &mut App) {
         content,
         title,
         offset,
+        diff,
     } = &app.mode
     {
         let block = Block::default().borders(Borders::ALL).title(title.as_str());
@@ -67,11 +68,18 @@ pub fn ui(f: &mut Frame, app: &mut App) {
         let number_width = inner_height.to_string().len().max(1);
         // wrap each content line into display rows of at most (width - margin) cols
         let text_width = content_area.width.saturating_sub((number_width + 1) as u16) as usize;
-        let mut rows: Vec<String> = Vec::new();
-        for line in content.lines() {
+        // diff lines are coloured by kind; wrapped rows keep their line's colour
+        let kinds = if *diff {
+            crate::diff::classify_lines(content)
+        } else {
+            Vec::new()
+        };
+        let mut rows: Vec<(String, Style)> = Vec::new();
+        for (i, line) in content.lines().enumerate() {
+            let style = kinds.get(i).map_or(Style::default(), |&k| diff_style(k));
             // if the line fits, push as-is
             if UnicodeWidthStr::width(line) <= text_width {
-                rows.push(line.to_string());
+                rows.push((line.to_string(), style));
             } else {
                 let mut s = line;
                 // break into segments that fit
@@ -89,15 +97,15 @@ pub fn ui(f: &mut Frame, app: &mut App) {
                     if end == 0 {
                         let first = s.chars().next().unwrap();
                         let len = first.len_utf8();
-                        rows.push(s[..len].to_string());
+                        rows.push((s[..len].to_string(), style));
                         s = &s[len..];
                     } else {
-                        rows.push(s[..end].to_string());
+                        rows.push((s[..end].to_string(), style));
                         s = &s[end..];
                     }
                 }
                 if !s.is_empty() {
-                    rows.push(s.to_string());
+                    rows.push((s.to_string(), style));
                 }
             }
         }
@@ -109,11 +117,11 @@ pub fn ui(f: &mut Frame, app: &mut App) {
             .skip(start)
             .take(inner_height)
             .enumerate()
-            .map(|(i, row)| {
+            .map(|(i, (row, style))| {
                 let num = format!("{:>width$} ", i, width = number_width);
                 Line::from(vec![
                     Span::styled(num, Style::default().fg(Color::DarkGray)),
-                    Span::raw(row),
+                    Span::styled(row.as_str(), *style),
                 ])
             })
             .collect();
@@ -200,6 +208,18 @@ pub fn ui(f: &mut Frame, app: &mut App) {
         };
         let paragraph = Paragraph::new(prompt);
         f.render_widget(paragraph, footer);
+    }
+}
+
+/// Colour of a diff line in the diff viewer.
+fn diff_style(kind: crate::diff::LineKind) -> Style {
+    use crate::diff::LineKind;
+    match kind {
+        LineKind::Header => Style::default().add_modifier(Modifier::BOLD),
+        LineKind::Hunk => Style::default().fg(Color::Cyan),
+        LineKind::Added => Style::default().fg(Color::Green),
+        LineKind::Removed => Style::default().fg(Color::Red),
+        LineKind::Context => Style::default(),
     }
 }
 

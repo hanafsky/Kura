@@ -493,6 +493,7 @@ impl App {
                     content,
                     title,
                     offset: 0,
+                    diff: false,
                 };
             }
             Err(e) => self.notify_error(fs_error_message(&e, &path)),

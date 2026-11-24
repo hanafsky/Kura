@@ -40,6 +40,7 @@ const FILER_KEYS: Bindings = &[
     (KeyCode::Char('i'), Command::ToggleIgnored),
     (KeyCode::Char('n'), Command::SearchNext),
     (KeyCode::Char('N'), Command::SearchPrev),
+    (KeyCode::Char('D'), Command::Diff),
 ];
 
 /// Visual (range) selection.
@@ -55,6 +56,15 @@ const VIEWER_KEYS: Bindings = &[
     (KeyCode::Char('j'), Command::MoveDown(1)),
     (KeyCode::Char('k'), Command::MoveUp(1)),
     (KeyCode::Enter, Command::Back),
+];
+
+/// Diff viewer (`D`): like the text viewer, but `q` / `Esc` also close it.
+const DIFF_KEYS: Bindings = &[
+    (KeyCode::Char('j'), Command::MoveDown(1)),
+    (KeyCode::Char('k'), Command::MoveUp(1)),
+    (KeyCode::Enter, Command::Back),
+    (KeyCode::Esc, Command::Back),
+    (KeyCode::Char('q'), Command::Back),
 ];
 
 /// Image / video preview.
@@ -83,6 +93,7 @@ fn mode_command(mode: &Mode, code: KeyCode) -> Option<Command> {
     match mode {
         Mode::Filer => lookup(FILER_KEYS, code),
         Mode::Visual { .. } => lookup(VISUAL_KEYS, code),
+        Mode::Viewer { diff: true, .. } => lookup(DIFF_KEYS, code),
         Mode::Viewer { .. } => lookup(VIEWER_KEYS, code),
         Mode::Preview => lookup(PREVIEW_KEYS, code),
         Mode::Sort { .. } => lookup(SORT_KEYS, code),
@@ -129,7 +140,9 @@ impl KeyState {
             mode,
             Mode::ConfirmDelete { .. } | Mode::PasteConflict { .. }
         );
-        if code == KeyCode::Char('q') && !text_input && !in_dialog {
+        // In the diff viewer 'q' closes the diff (see DIFF_KEYS).
+        let q_closes = matches!(mode, Mode::Viewer { diff: true, .. });
+        if code == KeyCode::Char('q') && !text_input && !in_dialog && !q_closes {
             return Some(Command::Quit);
         }
 
@@ -233,6 +246,16 @@ mod tests {
             content: String::new(),
             title: String::new(),
             offset: 0,
+            diff: false,
+        }
+    }
+
+    fn diff_viewer() -> Mode {
+        Mode::Viewer {
+            content: String::new(),
+            title: String::new(),
+            offset: 0,
+            diff: true,
         }
     }
 
@@ -250,6 +273,7 @@ mod tests {
         assert_eq!(run(&f, &[ch('p')]), [Command::Paste]);
         assert_eq!(run(&f, &[ch('Y')]), [Command::CopyAtPaths]);
         assert_eq!(run(&f, &[ch('M')]), [Command::ToggleGitFilter]);
+        assert_eq!(run(&f, &[ch('D')]), [Command::Diff]);
         assert_eq!(run(&search(), &[ch('M')]), [Command::InsertChar('M')]);
         assert_eq!(run(&f, &[ch('.')]), [Command::ToggleHidden]);
         assert_eq!(run(&f, &[ch('i')]), [Command::ToggleIgnored]);
@@ -382,5 +406,20 @@ mod tests {
             run(&p, &[KeyCode::Esc]),
             [Command::ResolvePaste(ConflictChoice::Cancel)]
         );
+    }
+
+    #[test]
+    fn diff_viewer_keys() {
+        let d = diff_viewer();
+        for key in [ch('q'), KeyCode::Esc, KeyCode::Enter] {
+            assert_eq!(run(&d, &[key]), [Command::Back]);
+        }
+        assert_eq!(run(&d, &[ch('4'), ch('j')]), [Command::MoveDown(4)]);
+        assert_eq!(run(&d, &[ch('k')]), [Command::MoveUp(1)]);
+        assert_eq!(run(&d, &[ch('g'), ch('g')]), [Command::GoTop]);
+        assert_eq!(run(&d, &[ch('G')]), [Command::GoBottom]);
+        assert_eq!(run(&d, &[ch('D')]), []);
+        // The plain text viewer keeps its keys.
+        assert_eq!(run(&viewer(), &[ch('q')]), [Command::Quit]);
     }
 }
