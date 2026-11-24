@@ -35,10 +35,11 @@ fn run(
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
     // Query the terminal for its graphics protocol and font size.
-    let (picker, graphics_info) = graphics::detect();
-    let mut app = App::with_panes(picker, left, right, launch_dir)?;
-    app.graphics_info = graphics_info;
-    run_app(&mut terminal, &mut app)?;
+    // Keys typed meanwhile are kept and handled first.
+    let detected = graphics::detect();
+    let mut app = App::with_panes(detected.picker, left, right, launch_dir)?;
+    app.graphics_info = detected.info;
+    run_app(&mut terminal, &mut app, detected.typeahead)?;
     Ok(app.current_pane().current_dir.clone())
 }
 
