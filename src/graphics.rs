@@ -144,7 +144,7 @@ fn read_replies(kitty_queried: bool) -> Scan {
         }
         let since_status = status_at.map(|t| now.duration_since(t));
         if now >= deadline || query_done(&scan, kitty_queried, since_status) {
-            return scan;
+            return scan.finish();
         }
         let mut wait = deadline - now;
         if let Some(s) = since_status {
@@ -161,7 +161,7 @@ fn read_replies(kitty_queried: bool) -> Scan {
             if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
                 continue;
             }
-            return scan;
+            return scan.finish();
         }
         if ready == 0 || pfd.revents & libc::POLLIN == 0 {
             continue;
@@ -169,7 +169,7 @@ fn read_replies(kitty_queried: bool) -> Scan {
         let mut chunk = [0u8; 256];
         let n = unsafe { libc::read(libc::STDIN_FILENO, chunk.as_mut_ptr().cast(), chunk.len()) };
         if n <= 0 {
-            return scan;
+            return scan.finish();
         }
         buf.extend_from_slice(&chunk[..n as usize]);
     }
@@ -181,7 +181,7 @@ fn read_replies(kitty_queried: bool) -> Scan {
 #[cfg(unix)]
 fn query_done(scan: &Scan, kitty_queried: bool, since_status: Option<std::time::Duration>) -> bool {
     scan.replies.status
-        && !scan.partial
+        && (!scan.partial || scan.lone_esc)
         && (scan.replies.kitty_answered
             || !kitty_queried
             || since_status.is_some_and(|s| s >= KITTY_GRACE))
@@ -247,6 +247,23 @@ pub struct Scan {
     /// The bytes end in the middle of an escape sequence. It is left out of
     /// `input`; once more bytes arrive the whole buffer is split again.
     pub partial: bool,
+    /// The held-back tail is a single Esc: once the replies are complete it
+    /// can only be the Esc key.
+    pub lone_esc: bool,
+}
+
+impl Scan {
+    /// Final result when reading stops: a trailing lone Esc is the Esc key;
+    /// any other unfinished sequence is dropped (read as keys, its `?`,
+    /// digits, … would trigger commands).
+    pub fn finish(mut self) -> Scan {
+        if self.lone_esc {
+            self.input.push(ESC);
+        }
+        self.partial = false;
+        self.lone_esc = false;
+        self
+    }
 }
 
 const ESC: u8 = 0x1b;
@@ -267,6 +284,7 @@ pub fn split_replies(buf: &[u8]) -> Scan {
         }
         let Some(&kind) = buf.get(i + 1) else {
             scan.partial = true;
+            scan.lone_esc = true;
             break;
         };
         match kind {
@@ -422,6 +440,17 @@ mod tests {
     }
 
     #[test]
+    fn finish_keeps_a_trailing_esc_key_and_drops_other_fragments() {
+        let s = split_replies(&cat(&[DSR, b"\x1b"])).finish();
+        assert_eq!(s.input, b"\x1b");
+        assert!(!s.partial);
+        // No reply at all, only Esc pressed.
+        assert_eq!(split_replies(b"\x1b").finish().input, b"\x1b");
+        // A reply cut off by the deadline is not turned into keys.
+        assert_eq!(split_replies(b"j\x1b[?62").finish().input, b"j");
+    }
+
+    #[test]
     fn kitty_error_counts_as_answered_but_not_supported() {
         let s = split_replies(b"\x1b_Gi=31;ENOTSUPPORTED:\x1b\\");
         assert!(s.replies.kitty_answered);
@@ -466,6 +495,9 @@ mod tests {
         assert!(!query_done(&split_replies(b""), true, None));
         let partial = split_replies(&cat(&[DSR, b"\x1b_Gi=31"]));
         assert!(!query_done(&partial, true, Some(KITTY_GRACE)));
+        // A trailing Esc after the DSR reply does not hold things up.
+        let esc = split_replies(&cat(&[KITTY_OK, DSR, b"\x1b"]));
+        assert!(query_done(&esc, true, Some(Duration::ZERO)));
     }
 
     #[test]
