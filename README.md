@@ -101,6 +101,7 @@ sudo apt install ffmpeg
 - `Enter`: Enter the selected directory, open the text viewer for a text file, or show an image / video preview in the opposite pane. Press `Enter` (or `Esc` in preview) again to return to the file manager.
 - `o`: Open the selected entry with the default application (`open` on macOS), e.g. play a video in QuickTime. Works in the file list and in preview.
   On WSL the path is converted with `wslpath -w` and opened by `explorer.exe`. Set `KURA_OPENER` to use another program; it is split on whitespace and run as `<program> <args...> <path>` (e.g. `KURA_OPENER="code -r"` → `code -r <path>`).
+- `e`: Open the selected file or directory in your editor (`$VISUAL`, else `$EDITOR`, else `vi`). The value is split on whitespace like `KURA_OPENER` (e.g. `EDITOR="code -w"`). kura leaves the screen while the editor runs and comes back, refreshed, when it exits.
 - `v`: Toggle selection of the current entry in file manager mode. Selected entries are marked with a `*` symbol. Marks and the cursor follow the files themselves, so they stay put when the list is refreshed or re-sorted (e.g. after paste, delete, rename or sorting).
 - `y`: Copy the current entry or all marked entries to the clipboard.
 - `p`: Paste copied entries into the current directory.
@@ -138,3 +139,44 @@ cargo run
 Video previews and HEIC/AVIF images need `ffmpeg` (see [ffmpeg (optional)](#ffmpeg-optional)).
 
 The graphics protocol is detected automatically and shown in the preview footer. To force one, set `KURA_IMAGE_PROTOCOL` to `kitty`, `sixel`, `iterm2`, or `halfblocks`.
+
+### Command-line arguments
+
+```
+kura [OPTIONS] [LEFT] [RIGHT]
+```
+
+- `LEFT` / `RIGHT`: Directories for the left / right pane. With one path, it is used for the left pane; omitted panes start in the current directory.
+- `--last-dir-path <FILE>`: On exit, write the active pane's directory to `FILE` (see below).
+- `-h`, `--help` / `-V`, `--version`
+
+### cd on exit
+
+A program cannot change its parent shell's directory, so use a wrapper function: it runs kura with `--last-dir-path` and then `cd`s into the directory that was active when you quit.
+
+```bash
+# ~/.bashrc or ~/.zshrc
+k() {
+    local tmp dir
+    tmp="$(mktemp)" || return
+    command kura --last-dir-path "$tmp" "$@"
+    dir="$(cat -- "$tmp")"
+    rm -f -- "$tmp"
+    if [ -n "$dir" ] && [ -d "$dir" ] && [ "$dir" != "$PWD" ]; then
+        cd -- "$dir" || return
+    fi
+}
+```
+
+```fish
+# ~/.config/fish/functions/k.fish
+function k
+    set -l tmp (mktemp); or return
+    command kura --last-dir-path $tmp $argv
+    set -l dir (cat -- $tmp)
+    rm -f -- $tmp
+    if test -n "$dir"; and test -d "$dir"; and test "$dir" != "$PWD"
+        cd $dir
+    end
+end
+```

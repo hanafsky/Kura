@@ -25,6 +25,7 @@ const FILER_KEYS: Bindings = &[
     (KeyCode::Char('l'), Command::MoveRight),
     (KeyCode::Enter, Command::Open),
     (KeyCode::Char('o'), Command::OpenExternal),
+    (KeyCode::Char('e'), Command::OpenEditor),
     (KeyCode::Char('v'), Command::ToggleMark),
     (KeyCode::Char('V'), Command::VisualStart),
     (KeyCode::Char('y'), Command::Yank),
@@ -198,6 +199,9 @@ pub fn run_app<B: Backend<Error = io::Error> + Write>(
                     if app.apply(cmd).is_break() {
                         return Ok(());
                     }
+                    if let Some(path) = app.pending_edit.take() {
+                        crate::editor::edit(terminal, app, &path)?;
+                    }
                 }
             }
         }
@@ -274,6 +278,9 @@ mod tests {
         assert_eq!(run(&f, &[ch('Y')]), [Command::CopyAtPaths]);
         assert_eq!(run(&f, &[ch('M')]), [Command::ToggleGitFilter]);
         assert_eq!(run(&f, &[ch('D')]), [Command::Diff]);
+        assert_eq!(run(&f, &[ch('e')]), [Command::OpenEditor]);
+        assert_eq!(run(&search(), &[ch('e')]), [Command::InsertChar('e')]);
+        assert!(run(&viewer(), &[ch('e')]).is_empty());
         assert_eq!(run(&search(), &[ch('M')]), [Command::InsertChar('M')]);
         assert_eq!(run(&f, &[ch('.')]), [Command::ToggleHidden]);
         assert_eq!(run(&f, &[ch('i')]), [Command::ToggleIgnored]);

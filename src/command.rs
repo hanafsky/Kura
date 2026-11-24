@@ -39,6 +39,8 @@ pub enum Command {
     Open,
     /// Open the entry under the cursor with the system's default application.
     OpenExternal,
+    /// Open the entry (file or directory) under the cursor in `$VISUAL` / `$EDITOR` / `vi`.
+    OpenEditor,
     /// Mark / unmark the entry under the cursor.
     ToggleMark,
     /// Start a Visual (range) selection at the cursor.
@@ -145,6 +147,7 @@ impl App {
                     }
                 }
             }
+            Command::OpenEditor if filer => self.pending_edit = self.selected_path(),
             Command::ToggleMark if filer => toggle_mark(self.current_pane_mut()),
             Command::VisualStart if filer => {
                 let pane = self.current_pane_mut();
@@ -453,6 +456,30 @@ mod tests {
         assert_eq!(selected_name(&app), "a");
         let _ = app.apply(Command::GoBottom);
         assert_eq!(selected_name(&app), "d");
+    }
+
+    #[test]
+    fn open_editor_requests_the_entry_under_the_cursor() {
+        let tmp = abcd();
+        fs::create_dir(tmp.path().join("dir")).unwrap();
+        let mut app = app_in(tmp.path());
+        // Directories are listed first: the cursor starts on "dir", which
+        // is opened in the editor too (e.g. Vim's netrw).
+        assert!(app.apply(Command::OpenEditor).is_continue());
+        assert_eq!(app.pending_edit, Some(tmp.path().join("dir")));
+        app.pending_edit = None;
+        let _ = app.apply(Command::MoveDown(1));
+        let _ = app.apply(Command::OpenEditor);
+        assert_eq!(app.pending_edit, Some(tmp.path().join("a")));
+    }
+
+    #[test]
+    fn open_editor_is_ignored_outside_the_file_list() {
+        let tmp = abcd();
+        let mut app = app_in(tmp.path());
+        let _ = app.apply(Command::SearchStart);
+        let _ = app.apply(Command::OpenEditor);
+        assert_eq!(app.pending_edit, None);
     }
 
     #[test]

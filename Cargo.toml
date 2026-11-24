@@ -10,6 +10,7 @@ ratatui-image = { version = "11.1", default-features = false, features = ["cross
 image = "0.25"
 unicode-width = "0.1"
 trash = "5.4"
+clap = { version = "4.6.9", features = ["derive"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
