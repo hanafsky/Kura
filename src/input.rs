@@ -6,7 +6,8 @@
 
 use crossterm::event::{self, Event, KeyCode};
 use ratatui::{backend::Backend, Terminal};
-use std::time::Duration;
+use std::sync::mpsc;
+use std::time::{Duration, Instant, SystemTime};
 use std::{io, io::Write};
 
 use crate::app::App;
@@ -14,6 +15,7 @@ use crate::command::Command;
 use crate::delete_confirm::{confirm_key, ConfirmAction, DeleteKind};
 use crate::mode::Mode;
 use crate::paste::conflict_choice;
+use crate::watch::{self, DirWatcher, FsEvent};
 
 type Bindings = &'static [(KeyCode, Command)];
 
@@ -42,6 +44,7 @@ const FILER_KEYS: Bindings = &[
     (KeyCode::Char('n'), Command::SearchNext),
     (KeyCode::Char('N'), Command::SearchPrev),
     (KeyCode::Char('D'), Command::Diff),
+    (KeyCode::Char('R'), Command::Refresh),
 ];
 
 /// Visual (range) selection.
@@ -183,27 +186,76 @@ impl KeyState {
     }
 }
 
-/// Main event loop: draw, read a key, translate it and apply the command.
+/// Longest wait for a key before checking for directory changes. Input is
+/// read on this thread only (never in the background), so an editor started
+/// with `e` gets every key; the loop just wakes this often without drawing.
+const TICK: Duration = Duration::from_millis(200);
+
+/// How long to wait for input: until the next highlight expires, at most
+/// [`TICK`].
+fn poll_timeout(highlight_expiry: Option<Duration>) -> Duration {
+    highlight_expiry.map_or(TICK, |d| d.min(TICK))
+}
+
+/// Main event loop: wait for a key, a directory change or the expiry of a
+/// "just changed" highlight, and redraw only when one of them happened.
 pub fn run_app<B: Backend<Error = io::Error> + Write>(
     terminal: &mut Terminal<B>,
     app: &mut App,
 ) -> io::Result<()> {
+    let (tx, fs_events) = mpsc::channel::<FsEvent>();
+    let mode = watch::parse_watch_mode(std::env::var(watch::WATCH_ENV).ok().as_deref());
+    let mut watcher = match DirWatcher::start(mode, tx, |e| e) {
+        Ok(w) => w,
+        Err(e) => {
+            app.notify_error(format!("File watching disabled: {e}"));
+            None
+        }
+    };
     let mut keys = KeyState::default();
+    let mut dirty = true;
     loop {
-        terminal.draw(|f| crate::ui::ui(f, app))?;
-        if event::poll(Duration::from_millis(100))? {
-            if let Event::Key(key) = event::read()? {
-                // A status message stays until the next key press.
-                app.message = None;
-                if let Some(cmd) = keys.translate(&app.mode, key.code) {
-                    if app.apply(cmd).is_break() {
-                        return Ok(());
-                    }
-                    if let Some(path) = app.pending_edit.take() {
-                        crate::editor::edit(terminal, app, &path)?;
+        if let Some(w) = watcher.as_mut() {
+            if let Some((dir, e)) = w.sync(&app.watch_targets()).into_iter().next() {
+                let name = dir.file_name().map_or_else(
+                    || dir.display().to_string(),
+                    |n| n.to_string_lossy().into_owned(),
+                );
+                app.notify_error(format!("Cannot watch: {e}: {name}"));
+            }
+        }
+        if dirty {
+            terminal.draw(|f| crate::ui::ui(f, app))?;
+            dirty = false;
+        }
+        let expiry = app.next_highlight_expiry(SystemTime::now());
+        let started = Instant::now();
+        if event::poll(poll_timeout(expiry))? {
+            match event::read()? {
+                Event::Key(key) => {
+                    dirty = true;
+                    // A status message stays until the next key press.
+                    app.message = None;
+                    if let Some(cmd) = keys.translate(&app.mode, key.code) {
+                        if app.apply(cmd).is_break() {
+                            return Ok(());
+                        }
+                        if let Some(path) = app.pending_edit.take() {
+                            // Changes made meanwhile are queued and handled below.
+                            crate::editor::edit(terminal, app, &path)?;
+                        }
                     }
                 }
+                Event::Resize(..) => dirty = true,
+                _ => {}
             }
+        }
+        while let Ok(fs_event) = fs_events.try_recv() {
+            app.handle_fs_event(&fs_event);
+            dirty = true;
+        }
+        if expiry.is_some_and(|d| started.elapsed() >= d) {
+            dirty = true;
         }
     }
 }
@@ -281,6 +333,17 @@ mod tests {
         assert_eq!(run(&f, &[ch('e')]), [Command::OpenEditor]);
         assert_eq!(run(&search(), &[ch('e')]), [Command::InsertChar('e')]);
         assert!(run(&viewer(), &[ch('e')]).is_empty());
+        assert_eq!(run(&f, &[ch('R')]), [Command::Refresh]);
+        assert_eq!(run(&search(), &[ch('R')]), [Command::InsertChar('R')]);
+        assert_eq!(
+            run(
+                &Mode::Visual {
+                    anchor: PathBuf::new()
+                },
+                &[ch('R')]
+            ),
+            []
+        );
         assert_eq!(run(&search(), &[ch('M')]), [Command::InsertChar('M')]);
         assert_eq!(run(&f, &[ch('.')]), [Command::ToggleHidden]);
         assert_eq!(run(&f, &[ch('i')]), [Command::ToggleIgnored]);
@@ -291,6 +354,16 @@ mod tests {
         }
         assert_eq!(run(&f, &[ch('z')]), []);
         assert_eq!(run(&f, &[KeyCode::Down]), []);
+    }
+
+    #[test]
+    fn poll_timeout_waits_for_the_next_highlight_expiry_at_most_a_tick() {
+        assert_eq!(poll_timeout(None), TICK);
+        assert_eq!(
+            poll_timeout(Some(Duration::from_millis(50))),
+            Duration::from_millis(50)
+        );
+        assert_eq!(poll_timeout(Some(Duration::from_secs(9))), TICK);
     }
 
     #[test]
@@ -310,7 +383,9 @@ mod tests {
 
     #[test]
     fn digits_are_not_a_count_outside_filer_and_viewer() {
-        let visual = Mode::Visual { anchor: 0 };
+        let visual = Mode::Visual {
+            anchor: PathBuf::new(),
+        };
         assert_eq!(run(&visual, &[ch('5'), ch('j')]), [Command::MoveDown(1)]);
         assert_eq!(run(&search(), &[ch('5')]), [Command::InsertChar('5')]);
     }
@@ -338,7 +413,9 @@ mod tests {
     fn q_quits_except_in_text_input_and_dialogs() {
         for mode in [
             Mode::Filer,
-            Mode::Visual { anchor: 0 },
+            Mode::Visual {
+                anchor: PathBuf::new(),
+            },
             viewer(),
             Mode::Preview,
             Mode::Sort { selected: 0 },
@@ -370,7 +447,9 @@ mod tests {
 
     #[test]
     fn visual_swallows_other_keys() {
-        let v = Mode::Visual { anchor: 0 };
+        let v = Mode::Visual {
+            anchor: PathBuf::new(),
+        };
         assert_eq!(run(&v, &[ch('x'), KeyCode::Enter, ch('y')]), []);
         assert_eq!(run(&v, &[ch('V')]), [Command::Back]);
         assert_eq!(run(&v, &[KeyCode::Esc]), [Command::Back]);

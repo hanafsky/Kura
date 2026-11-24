@@ -82,6 +82,8 @@ pub enum Command {
     /// Show the diff between the files under the cursors of both panes
     /// (or of the active file against HEAD).
     Diff,
+    /// Re-read both panes from disk (also works with `KURA_WATCH=off`).
+    Refresh,
     /// Sort by the highlighted option.
     SortConfirm,
     /// Type a character into the search query or rename buffer.
@@ -150,11 +152,10 @@ impl App {
             Command::OpenEditor if filer => self.pending_edit = self.selected_path(),
             Command::ToggleMark if filer => toggle_mark(self.current_pane_mut()),
             Command::VisualStart if filer => {
-                let pane = self.current_pane_mut();
-                let anchor = pane.selected;
-                pane.marked.clear();
-                pane.mark_index(anchor);
-                self.mode = Mode::Visual { anchor };
+                if let Some(anchor) = self.selected_path() {
+                    self.mode = Mode::Visual { anchor };
+                    self.update_visual_marks();
+                }
             }
             Command::Yank if filer => copy_selection(self),
             Command::Paste if filer => paste(self),
@@ -210,6 +211,7 @@ impl App {
             Command::ToggleHidden if filer => self.toggle_hidden(),
             Command::ToggleIgnored if filer => self.toggle_ignored(),
             Command::Diff if filer => self.show_diff(),
+            Command::Refresh if filer => self.refresh_all(),
             Command::SortConfirm => {
                 if let Mode::Sort { selected } = self.mode {
                     self.mode = Mode::Filer;
@@ -274,19 +276,7 @@ impl App {
                         self.on_up();
                     }
                 }
-                if let Mode::Visual { anchor } = self.mode {
-                    let pane = self.current_pane_mut();
-                    pane.marked.clear();
-                    let end = pane.selected;
-                    let (lo, hi) = if anchor <= end {
-                        (anchor, end)
-                    } else {
-                        (end, anchor)
-                    };
-                    for i in lo..=hi {
-                        pane.mark_index(i);
-                    }
-                }
+                self.update_visual_marks();
             }
             Mode::Viewer { offset, .. } => {
                 *offset = if down {
@@ -496,7 +486,7 @@ mod tests {
         let mut app = app_in(tmp.path());
         let _ = app.apply(Command::MoveDown(1));
         let _ = app.apply(Command::VisualStart);
-        assert!(matches!(app.mode, Mode::Visual { anchor: 1 }));
+        assert!(matches!(&app.mode, Mode::Visual { anchor } if *anchor == tmp.path().join("b")));
         let _ = app.apply(Command::MoveDown(2));
         assert_eq!(marked(&app), vec![1, 2, 3]);
         let _ = app.apply(Command::MoveUp(3));
@@ -941,6 +931,223 @@ mod tests {
         let _ = app.apply(Command::ToggleGitFilter);
         assert!(!app.current_pane().git_filter_active());
         assert_eq!(app.current_pane().items.len(), 5); // .git, a, b, c, d
+    }
+
+    fn changed(paths: &[std::path::PathBuf]) -> crate::watch::FsEvent {
+        crate::watch::FsEvent::Changed(paths.to_vec())
+    }
+
+    #[test]
+    fn fs_event_refreshes_the_pane_keeping_cursor_and_marks() {
+        let tmp = abcd();
+        let mut app = app_in(tmp.path());
+        let _ = app.apply(Command::ToggleMark); // a
+        let _ = app.apply(Command::MoveDown(2)); // c
+        fs::write(tmp.path().join("0new"), "").unwrap();
+
+        // A change elsewhere (or deeper down) does not re-read the listing.
+        app.handle_fs_event(&changed(&[tmp.path().join("sub/x")]));
+        assert_eq!(names(&app), ["a", "b", "c", "d"]);
+
+        app.handle_fs_event(&changed(&[tmp.path().join("0new")]));
+        assert_eq!(names(&app), ["0new", "a", "b", "c", "d"]);
+        assert_eq!(names_of(&app.right), names(&app)); // same directory
+        assert_eq!(selected_name(&app), "c");
+        assert_eq!(marked(&app), vec![1]);
+        assert!(app.message.is_none());
+    }
+
+    fn names_of(pane: &crate::app::Pane) -> Vec<String> {
+        pane.items
+            .iter()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn fs_event_refreshes_only_the_pane_showing_the_directory() {
+        let tmp = abcd();
+        fs::create_dir(tmp.path().join("sub")).unwrap();
+        let mut app = app_in(tmp.path());
+        app.right.change_dir(tmp.path().join("sub")).unwrap();
+        fs::write(tmp.path().join("sub/s"), "").unwrap();
+        fs::write(tmp.path().join("e"), "").unwrap();
+
+        app.handle_fs_event(&changed(&[tmp.path().join("sub/s")]));
+        assert_eq!(names_of(&app.right), ["s"]);
+        assert_eq!(names_of(&app.left), ["sub", "a", "b", "c", "d"]);
+
+        app.handle_fs_event(&crate::watch::FsEvent::Rescan);
+        assert_eq!(names_of(&app.left), ["sub", "a", "b", "c", "d", "e"]);
+    }
+
+    #[test]
+    fn fs_event_for_a_removed_directory_reports_an_error() {
+        let tmp = abcd();
+        fs::create_dir(tmp.path().join("sub")).unwrap();
+        let mut app = app_in(tmp.path());
+        app.right.change_dir(tmp.path().join("sub")).unwrap();
+        assert_eq!(app.watch_targets().len(), 2);
+        fs::remove_dir(tmp.path().join("sub")).unwrap();
+        assert_eq!(app.watch_targets(), vec![tmp.path().to_path_buf()]);
+        app.handle_fs_event(&changed(&[tmp.path().join("sub")]));
+        let msg = app.message.as_ref().unwrap();
+        assert_eq!(msg.level, MessageLevel::Error);
+        assert!(msg.text.ends_with(": sub"), "{}", msg.text);
+
+        app.handle_fs_event(&crate::watch::FsEvent::Error("boom".into()));
+        assert_eq!(app.message.as_ref().unwrap().text, "Watch error: boom");
+    }
+
+    #[test]
+    fn visual_range_follows_paths_across_refresh() {
+        let tmp = abcd();
+        let mut app = app_in(tmp.path());
+        let _ = app.apply(Command::MoveDown(1)); // b
+        let _ = app.apply(Command::VisualStart);
+        let _ = app.apply(Command::MoveDown(1)); // c
+        assert_eq!(marked(&app), vec![1, 2]);
+
+        // Entries appear before the anchor and inside the range.
+        fs::write(tmp.path().join("0"), "").unwrap();
+        fs::write(tmp.path().join("bb"), "").unwrap();
+        app.handle_fs_event(&changed(&[tmp.path().join("0"), tmp.path().join("bb")]));
+        assert_eq!(names(&app), ["0", "a", "b", "bb", "c", "d"]);
+        assert_eq!(selected_name(&app), "c");
+        assert_eq!(marked(&app), vec![2, 3, 4]); // b, bb, c
+        let _ = app.apply(Command::MoveDown(1)); // d
+        assert_eq!(marked(&app), vec![2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn visual_restarts_at_the_cursor_when_the_anchor_is_removed() {
+        let tmp = abcd();
+        let mut app = app_in(tmp.path());
+        let _ = app.apply(Command::VisualStart); // a
+        let _ = app.apply(Command::MoveDown(2)); // c
+        fs::remove_file(tmp.path().join("a")).unwrap();
+        app.handle_fs_event(&changed(&[tmp.path().join("a")]));
+        assert_eq!(selected_name(&app), "c");
+        assert_eq!(marked(&app), vec![1]);
+        assert!(matches!(&app.mode, Mode::Visual { anchor } if *anchor == tmp.path().join("c")));
+        let _ = app.apply(Command::MoveUp(1)); // b
+        assert_eq!(marked(&app), vec![0, 1]);
+    }
+
+    #[test]
+    fn rename_is_cancelled_when_the_file_is_removed_from_outside() {
+        let tmp = abcd();
+        let mut app = app_in(tmp.path());
+        let _ = app.apply(Command::MoveDown(1)); // b
+        let _ = app.apply(Command::RenameStart);
+        let _ = app.apply(Command::InsertChar('z'));
+        fs::remove_file(tmp.path().join("b")).unwrap();
+        app.handle_fs_event(&changed(&[tmp.path().join("b")]));
+        assert!(matches!(app.mode, Mode::Filer));
+        assert_eq!(
+            app.message.as_ref().unwrap().text,
+            "Rename cancelled: b is gone"
+        );
+        // A late Enter must not rename the entry now under the cursor.
+        let _ = app.apply(Command::RenameCommit);
+        assert_eq!(names(&app), ["a", "c", "d"]);
+    }
+
+    #[test]
+    fn rename_continues_when_other_files_change() {
+        let tmp = abcd();
+        let mut app = app_in(tmp.path());
+        let _ = app.apply(Command::MoveDown(1)); // b
+        let _ = app.apply(Command::RenameStart);
+        fs::write(tmp.path().join("0"), "").unwrap();
+        app.handle_fs_event(&changed(&[tmp.path().join("0")]));
+        let _ = app.apply(Command::InsertChar('z'));
+        let _ = app.apply(Command::RenameCommit);
+        assert_eq!(names(&app), ["0", "a", "bz", "c", "d"]);
+    }
+
+    #[test]
+    fn refresh_rereads_both_panes_keeping_cursor_and_marks() {
+        let tmp = abcd();
+        fs::create_dir(tmp.path().join("sub")).unwrap();
+        let mut app = app_in(tmp.path());
+        app.right.change_dir(tmp.path().join("sub")).unwrap();
+        let _ = app.apply(Command::MoveDown(1)); // a
+        let _ = app.apply(Command::ToggleMark);
+        let _ = app.apply(Command::MoveDown(2)); // c
+        fs::write(tmp.path().join("0"), "").unwrap();
+        fs::write(tmp.path().join("sub/s"), "").unwrap();
+
+        let _ = app.apply(Command::Refresh);
+        assert_eq!(names(&app), ["sub", "0", "a", "b", "c", "d"]);
+        assert_eq!(names_of(&app.right), ["s"]);
+        assert_eq!(selected_name(&app), "c");
+        assert_eq!(marked(&app), vec![2]);
+        assert_eq!(app.message.as_ref().unwrap().text, "Refreshed");
+    }
+
+    #[test]
+    fn refresh_reports_a_removed_directory_and_is_filer_only() {
+        let tmp = abcd();
+        fs::create_dir(tmp.path().join("sub")).unwrap();
+        let mut app = app_in(tmp.path());
+        app.right.change_dir(tmp.path().join("sub")).unwrap();
+        fs::remove_dir(tmp.path().join("sub")).unwrap();
+        let _ = app.apply(Command::Refresh);
+        let msg = app.message.as_ref().unwrap();
+        assert_eq!(msg.level, MessageLevel::Error);
+        assert!(msg.text.ends_with(": sub"), "{}", msg.text);
+
+        app.message = None;
+        fs::write(tmp.path().join("e"), "").unwrap();
+        let _ = app.apply(Command::SortMenu);
+        let _ = app.apply(Command::Refresh);
+        assert!(app.message.is_none());
+        assert_eq!(names_of(&app.left), ["a", "b", "c", "d"]); // no "e"
+    }
+
+    #[test]
+    fn fs_event_keeps_the_hidden_filter() {
+        let tmp = abcd();
+        let mut app = app_in(tmp.path());
+        let _ = app.apply(Command::ToggleHidden);
+        fs::write(tmp.path().join(".dot"), "").unwrap();
+        fs::write(tmp.path().join("e"), "").unwrap();
+        app.handle_fs_event(&changed(&[tmp.path().join(".dot"), tmp.path().join("e")]));
+        assert_eq!(names(&app), ["a", "b", "c", "d", "e"]);
+    }
+
+    #[test]
+    fn fs_event_rereads_git_status() {
+        let tmp = abcd();
+        if !git(tmp.path(), &["init", "-q", "-b", "main"]) {
+            return;
+        }
+        assert!(git(tmp.path(), &["add", "."]));
+        assert!(git(tmp.path(), &["commit", "-qm", "init"]));
+        let mut app = app_in(tmp.path());
+        let status = |app: &App| {
+            let pane = app.current_pane();
+            let e = pane.items.iter().find(|e| e.file_name() == "c").unwrap();
+            pane.git_status_of(e)
+        };
+        assert_eq!(status(&app), None);
+        fs::write(tmp.path().join("c"), "changed").unwrap();
+        app.handle_fs_event(&changed(&[tmp.path().join("c")]));
+        assert_eq!(status(&app), Some(crate::git::FileStatus::Modified));
+    }
+
+    #[test]
+    fn new_files_schedule_a_highlight_expiry() {
+        let tmp = abcd();
+        let mut app = app_in(tmp.path());
+        let now = std::time::SystemTime::now();
+        // Files from before the session are never highlighted.
+        app.session_start = now + std::time::Duration::from_secs(3600);
+        assert_eq!(app.next_highlight_expiry(now), None);
+        app.session_start = now - std::time::Duration::from_secs(3600);
+        let expiry = app.next_highlight_expiry(now).expect("just written");
+        assert!(expiry <= crate::watch::RECENT_WINDOW);
     }
 
     #[test]

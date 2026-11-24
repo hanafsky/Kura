@@ -114,6 +114,7 @@ sudo apt install ffmpeg
 - `D`: Show the diff between the files under the cursors of the left and right panes (`git diff --no-index`), e.g. the same file in the main checkout and in an agent's worktree. Removed lines are red, added lines green and hunk headers (`@@`) cyan. It scrolls like the text viewer (`j` / `k`, numeric prefixes, `gg` / `G`); `Enter`, `q` or `Esc` returns to the file list. If only the active pane's cursor is on a file inside a git repository (e.g. the other pane's cursor is on a directory), or both panes point to the same file inside a repository (e.g. right after starting kura), that file's changes against `HEAD` (`git diff HEAD`) are shown instead. When there is nothing to diff (the active cursor is on a directory, both panes point to the same file outside a repository, no differences), the reason is shown in the status line.
 - `/`: Enter search mode. Type a query to jump to matching entries (case-insensitive substring). The whole list is searched from the cursor, wrapping around at the end; press Enter or Esc to exit search.
 - `n` / `N`: Jump to the next / previous match of the last search (wrapping around).
+- `R`: Reload both panes from disk (cursor and marks stay on the same files). Useful with `KURA_WATCH=off` or when a change was missed.
 - `r`: Rename the selected file; an inline prompt appears at the bottom.
 - `s`: Open a sort popup to choose ordering (modified/created/size/alphabetical). The chosen order is kept per pane, also when moving to another directory. The last row, `Directories first: on/off`, toggles listing directories before files (on by default).
 - `x`: Move the selected entry or all marked entries to the OS trash, after confirmation (`y` confirms; `n` / `Esc` / `Enter` / `q` cancel). If the trash is not available (e.g. on WSL or some Linux setups), an error is shown in the status line and nothing is deleted.
@@ -127,8 +128,10 @@ sudo apt install ffmpeg
 - **Red**: Hidden items (files or directories starting with `.`)
 - **Green**: Executable files
 - Others: Default color
+- **Gray background, bold**: Changed in the last 10 seconds (by kura or any other program, e.g. a coding agent)
+- **Underlined**: Changed since kura started
 
-Inside a git repository, a status symbol is shown before each name: `M` modified, `A` added, `D` deleted (deleted files have no row; their directory gets `+`), `R` renamed, `U` conflicted, `?` untracked, `!` ignored, `+` directory containing changes. The current branch is shown in the status line. The status is read when a directory is loaded (moving, paste, delete, rename), not continuously.
+Inside a git repository, a status symbol is shown before each name: `M` modified, `A` added, `D` deleted (deleted files have no row; their directory gets `+`), `R` renamed, `U` conflicted, `?` untracked, `!` ignored, `+` directory containing changes. The current branch is shown in the status line. The status is read again whenever the listing is reloaded (moving, paste, delete, rename, or a change detected by file watching).
 
 ## Usage
 
@@ -180,3 +183,11 @@ function k
     end
 end
 ```
+
+### File watching
+
+The directories shown in the two panes are watched, and the listing updates by itself when files change (cursor and marks stay on the same files). Set `KURA_WATCH` to choose how:
+
+- unset: OS file events
+- `poll`: re-scan every second, for filesystems without events (e.g. WSL2 `/mnt/c`, network drives)
+- `off`: no watching (press `R` to reload)

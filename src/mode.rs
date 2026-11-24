@@ -10,9 +10,10 @@ pub enum PaneType {
 
 pub enum Mode {
     Filer,
-    /// Visual multi-selection mode (anchor index for selection range)
+    /// Visual multi-selection mode. The anchor is the path of the entry
+    /// where the selection started, so it survives refreshes.
     Visual {
-        anchor: usize,
+        anchor: PathBuf,
     },
     Viewer {
         content: String,

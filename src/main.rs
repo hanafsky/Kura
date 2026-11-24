@@ -16,6 +16,7 @@ mod mode;
 mod paste;
 mod terminal;
 mod ui;
+mod watch;
 
 use app::App;
 use clap::Parser;
