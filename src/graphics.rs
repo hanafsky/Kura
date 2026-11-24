@@ -411,6 +411,18 @@ mod tests {
     }
 
     #[test]
+    fn key_typed_before_a_kitty_answering_terminal_replies_is_kept() {
+        let ghostty = split_replies(&cat(&[b"j", KITTY_OK, DA1_SIXEL, CELL, DSR]));
+        // herdr: cell size and DSR first, Kitty and DA1 a little later.
+        let herdr = split_replies(&cat(&[b"j", CELL, DSR, KITTY_OK, b"\x1b[?62;22c"]));
+        for s in [ghostty, herdr] {
+            assert_eq!(s.input, b"j");
+            assert!(s.replies.kitty && s.replies.status);
+            assert_eq!(crate::input::typeahead_keys(&s.input), [KeyCode::Char('j')]);
+        }
+    }
+
+    #[test]
     fn user_csi_sequences_are_input_not_replies() {
         // Arrow up, Delete, and a DSR-looking-but-different `CSI 6 n`.
         let s = split_replies(&cat(&[b"\x1b[A", b"\x1b[3~", DSR]));
