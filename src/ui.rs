@@ -294,6 +294,12 @@ fn draw_pane(f: &mut Frame, area: Rect, pane: &Pane, active: bool) {
     if pane.git_filter_active() {
         title.push_str("[changed only] ");
     }
+    if !pane.show_hidden {
+        title.push_str("[no hidden] ");
+    }
+    if pane.ignore_filter_active() {
+        title.push_str("[no ignored] ");
+    }
     let block = Block::default().borders(Borders::ALL).title(Span::styled(
         title,
         Style::default()
@@ -473,5 +479,26 @@ mod tests {
         assert!(screen.contains("f1"));
         assert!(screen.contains("(y/N)"));
         assert!(!screen.contains("cannot be undone"));
+    }
+
+    #[test]
+    fn pane_title_shows_active_filters() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut pane = Pane::new(tmp.path().to_path_buf()).unwrap();
+        let title = |pane: &Pane| {
+            let mut term = Terminal::new(TestBackend::new(200, 3)).unwrap();
+            term.draw(|f| draw_pane(f, f.area(), pane, true)).unwrap();
+            let buf = term.backend().buffer();
+            (0..200).map(|x| buf[(x, 0)].symbol()).collect::<String>()
+        };
+        assert!(!title(&pane).contains("[no hidden]"));
+        pane.toggle_hidden().unwrap();
+        assert!(title(&pane).contains("[no hidden]"));
+        // The ignore filter is shown only when it is in effect (in a repo).
+        pane.hide_ignored = true;
+        assert_eq!(
+            title(&pane).contains("[no ignored]"),
+            pane.ignore_filter_active()
+        );
     }
 }

@@ -12,7 +12,7 @@ use crate::actions::{
 };
 use crate::app::{fs_error_message, App};
 use crate::delete_confirm::DeleteKind;
-use crate::fs_utils::{apply_sort, find_match, SortBy, DIRS_FIRST_ROW, SORT_MENU_ROWS};
+use crate::fs_utils::{apply_sort, find_match, SearchFrom, SortBy, DIRS_FIRST_ROW, SORT_MENU_ROWS};
 use crate::media::open_external;
 use crate::mode::{Mode, PaneType};
 use crate::paste::ConflictChoice;
@@ -61,14 +61,21 @@ pub enum Command {
     RenameCommit,
     /// Start an incremental search.
     SearchStart,
-    /// Jump to the next match of the current query.
+    /// Jump to the next match of the current query (while searching) or of
+    /// the last search (`n` in the file list).
     SearchNext,
+    /// Jump to the previous match of the last search (`N`).
+    SearchPrev,
     /// Leave the search and open the entry under the cursor.
     SearchConfirm,
     /// Open the sort menu.
     SortMenu,
     /// Show only entries with git changes in the current pane, or all again.
     ToggleGitFilter,
+    /// Show or hide hidden (dot) entries in the current pane.
+    ToggleHidden,
+    /// Hide or show entries ignored by git in the current pane.
+    ToggleIgnored,
     /// Sort by the highlighted option.
     SortConfirm,
     /// Type a character into the search query or rename buffer.
@@ -182,15 +189,19 @@ impl App {
                     query: String::new(),
                 };
             }
-            Command::SearchNext => self.search_step(),
+            Command::SearchNext if filer => self.repeat_search(SearchFrom::Next),
+            Command::SearchPrev if filer => self.repeat_search(SearchFrom::Prev),
+            Command::SearchNext => self.search_step(SearchFrom::Next),
             Command::SearchConfirm => {
                 if matches!(self.mode, Mode::Search { .. }) {
-                    self.mode = Mode::Filer;
+                    self.end_search();
                     self.open_selected();
                 }
             }
             Command::SortMenu if filer => self.mode = Mode::Sort { selected: 0 },
             Command::ToggleGitFilter if filer => self.toggle_git_filter(),
+            Command::ToggleHidden if filer => self.toggle_hidden(),
+            Command::ToggleIgnored if filer => self.toggle_ignored(),
             Command::SortConfirm => {
                 if let Mode::Sort { selected } = self.mode {
                     self.mode = Mode::Filer;
@@ -212,7 +223,7 @@ impl App {
             Command::InsertChar(c) => match &mut self.mode {
                 Mode::Search { query } => {
                     query.push(c);
-                    self.search_step();
+                    self.search_step(SearchFrom::Here);
                 }
                 Mode::Rename { buffer, .. } => buffer.push(c),
                 _ => {}
@@ -220,7 +231,7 @@ impl App {
             Command::DeleteChar => match &mut self.mode {
                 Mode::Search { query } => {
                     query.pop();
-                    self.search_step();
+                    self.search_step(SearchFrom::Here);
                 }
                 Mode::Rename { buffer, .. } => {
                     buffer.pop();
@@ -235,6 +246,7 @@ impl App {
                     self.notify_info("Delete cancelled");
                 }
                 Mode::PasteConflict { .. } => resolve_paste_conflict(self, ConflictChoice::Cancel),
+                Mode::Search { .. } => self.end_search(),
                 _ => self.mode = Mode::Filer,
             },
             // Filer-only commands issued in another mode.
@@ -297,17 +309,47 @@ impl App {
         }
     }
 
-    /// Move the cursor to the next entry matching the search query.
-    fn search_step(&mut self) {
+    /// Move the cursor to an entry matching the search query being typed.
+    fn search_step(&mut self, from: SearchFrom) {
         let Mode::Search { query } = &self.mode else {
             return;
         };
         let q = query.clone();
         let pane = self.current_pane_mut();
-        if let Some(idx) = find_match(&pane.items, &q, pane.selected) {
+        if let Some(idx) = find_match(&entry_names(pane), &q, pane.selected, from) {
             pane.selected = idx;
         }
     }
+
+    /// Leave the search, remembering a non-empty query for `n` / `N`.
+    fn end_search(&mut self) {
+        if let Mode::Search { query } = std::mem::replace(&mut self.mode, Mode::Filer) {
+            if !query.is_empty() {
+                self.last_search = Some(query);
+            }
+        }
+    }
+
+    /// `n` / `N`: jump to the next / previous match of the last search.
+    fn repeat_search(&mut self, from: SearchFrom) {
+        let Some(q) = self.last_search.clone() else {
+            self.notify_info("No previous search");
+            return;
+        };
+        let pane = self.current_pane_mut();
+        match find_match(&entry_names(pane), &q, pane.selected, from) {
+            Some(idx) => pane.selected = idx,
+            None => self.notify_info(format!("Pattern not found: {q}")),
+        }
+    }
+}
+
+/// Names of the listed entries, in list order.
+fn entry_names(pane: &crate::app::Pane) -> Vec<String> {
+    pane.items
+        .iter()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect()
 }
 
 #[cfg(test)]
@@ -836,5 +878,201 @@ mod tests {
         assert_eq!(app.current_pane().items.len(), 4);
         let msg = app.message.as_ref().unwrap();
         assert_eq!(msg.text, "Not a git repository");
+    }
+
+    #[test]
+    fn toggle_hidden_hides_dot_entries_and_drops_their_marks() {
+        let tmp = abcd();
+        fs::write(tmp.path().join(".env"), "").unwrap();
+        fs::create_dir(tmp.path().join(".cache")).unwrap();
+        let mut app = app_in(tmp.path());
+        assert!(app.current_pane().show_hidden); // shown by default
+        assert_eq!(names(&app), [".cache", ".env", "a", "b", "c", "d"]);
+        let _ = app.apply(Command::ToggleMark); // .cache
+        let _ = app.apply(Command::MoveDown(3)); // b
+        let _ = app.apply(Command::ToggleMark);
+        let _ = app.apply(Command::ToggleHidden);
+        assert_eq!(names(&app), ["a", "b", "c", "d"]);
+        assert_eq!(selected_name(&app), "b");
+        assert_eq!(app.current_pane().marked, [tmp.path().join("b")].into());
+        assert_eq!(app.message.as_ref().unwrap().text, "Hiding hidden files");
+
+        // Kept when changing directory; per pane.
+        fs::create_dir(tmp.path().join("sub")).unwrap();
+        fs::write(tmp.path().join("sub/.x"), "").unwrap();
+        fs::write(tmp.path().join("sub/y"), "").unwrap();
+        app.current_pane_mut()
+            .change_dir(tmp.path().join("sub"))
+            .unwrap();
+        assert_eq!(names(&app), ["y"]);
+        assert!(app.right.show_hidden);
+
+        let _ = app.apply(Command::ToggleHidden);
+        assert_eq!(names(&app), [".x", "y"]);
+        assert_eq!(app.message.as_ref().unwrap().text, "Showing hidden files");
+        // Ignored outside the file list.
+        let _ = app.apply(Command::SortMenu);
+        let _ = app.apply(Command::ToggleHidden);
+        assert!(app.current_pane().show_hidden);
+    }
+
+    #[test]
+    fn n_and_shift_n_repeat_the_last_search_and_wrap() {
+        let tmp = tempfile::tempdir().unwrap();
+        for name in ["apple", "banana", "cherry", "grape"] {
+            fs::write(tmp.path().join(name), "").unwrap();
+        }
+        let mut app = app_in(tmp.path());
+        let _ = app.apply(Command::SearchNext);
+        assert_eq!(app.message.as_ref().unwrap().text, "No previous search");
+        assert_eq!(selected_name(&app), "apple");
+
+        let _ = app.apply(Command::GoBottom);
+        let _ = app.apply(Command::SearchStart);
+        // The match is searched from the cursor over the whole list.
+        let _ = app.apply(Command::InsertChar('a'));
+        assert_eq!(selected_name(&app), "grape");
+        let _ = app.apply(Command::InsertChar('n'));
+        assert_eq!(selected_name(&app), "banana"); // wrapped to the top
+        let _ = app.apply(Command::Back);
+        assert_eq!(app.last_search.as_deref(), Some("an"));
+
+        let _ = app.apply(Command::GoTop);
+        let _ = app.apply(Command::SearchNext);
+        assert_eq!(selected_name(&app), "banana");
+        let _ = app.apply(Command::SearchNext);
+        assert_eq!(selected_name(&app), "banana"); // the only match
+
+        let _ = app.apply(Command::SearchStart);
+        let _ = app.apply(Command::InsertChar('r'));
+        assert_eq!(selected_name(&app), "cherry");
+        let _ = app.apply(Command::SearchConfirm); // opens the viewer
+        assert_eq!(app.last_search.as_deref(), Some("r"));
+        let _ = app.apply(Command::Back);
+        let _ = app.apply(Command::SearchNext);
+        assert_eq!(selected_name(&app), "grape");
+        let _ = app.apply(Command::SearchNext);
+        assert_eq!(selected_name(&app), "cherry"); // wrapped
+        let _ = app.apply(Command::SearchPrev);
+        assert_eq!(selected_name(&app), "grape"); // wrapped back
+        let _ = app.apply(Command::SearchPrev);
+        assert_eq!(selected_name(&app), "cherry");
+
+        // An empty search keeps the previous query.
+        let _ = app.apply(Command::SearchStart);
+        let _ = app.apply(Command::Back);
+        assert_eq!(app.last_search.as_deref(), Some("r"));
+
+        app.last_search = Some("zzz".into());
+        let _ = app.apply(Command::SearchNext);
+        assert_eq!(selected_name(&app), "cherry");
+        assert_eq!(app.message.as_ref().unwrap().text, "Pattern not found: zzz");
+    }
+
+    #[test]
+    fn typing_a_query_keeps_the_cursor_on_a_matching_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        for name in ["read", "ream", "red"] {
+            fs::write(tmp.path().join(name), "").unwrap();
+        }
+        let mut app = app_in(tmp.path());
+        let _ = app.apply(Command::MoveDown(1)); // ream
+        let _ = app.apply(Command::SearchStart);
+        let _ = app.apply(Command::InsertChar('r'));
+        let _ = app.apply(Command::InsertChar('e'));
+        assert_eq!(selected_name(&app), "ream");
+        let _ = app.apply(Command::InsertChar('d'));
+        assert_eq!(selected_name(&app), "red");
+    }
+
+    #[test]
+    fn toggle_ignored_hides_gitignored_entries_and_combines_with_m() {
+        let tmp = abcd();
+        if !git(tmp.path(), &["init", "-q", "-b", "main"]) {
+            return;
+        }
+        fs::write(tmp.path().join(".gitignore"), "target/\n*.log\n").unwrap();
+        assert!(git(tmp.path(), &["add", "."]));
+        assert!(git(tmp.path(), &["commit", "-qm", "init"]));
+        fs::create_dir(tmp.path().join("target")).unwrap();
+        fs::write(tmp.path().join("target/out"), "").unwrap();
+        fs::write(tmp.path().join("x.log"), "").unwrap();
+        fs::write(tmp.path().join("new"), "").unwrap();
+        fs::write(tmp.path().join("c"), "changed").unwrap();
+        let mut app = app_in(tmp.path());
+        assert_eq!(
+            names(&app),
+            [
+                ".git",
+                "target",
+                ".gitignore",
+                "a",
+                "b",
+                "c",
+                "d",
+                "new",
+                "x.log"
+            ]
+        );
+        let _ = app.apply(Command::GoBottom); // x.log
+        let _ = app.apply(Command::ToggleMark);
+        let _ = app.apply(Command::MoveUp(4)); // b
+        let _ = app.apply(Command::ToggleMark);
+        let _ = app.apply(Command::ToggleIgnored);
+        assert!(app.current_pane().ignore_filter_active());
+        assert_eq!(
+            names(&app),
+            [".git", ".gitignore", "a", "b", "c", "d", "new"]
+        );
+        assert_eq!(selected_name(&app), "b");
+        assert_eq!(app.current_pane().marked, [tmp.path().join("b")].into());
+        assert_eq!(
+            app.message.as_ref().unwrap().text,
+            "Hiding git-ignored files"
+        );
+
+        // Combined with `M` and `.`.
+        let _ = app.apply(Command::ToggleGitFilter);
+        assert_eq!(names(&app), ["c", "new"]);
+        let _ = app.apply(Command::ToggleGitFilter);
+        let _ = app.apply(Command::ToggleHidden);
+        assert_eq!(names(&app), ["a", "b", "c", "d", "new"]);
+        let _ = app.apply(Command::ToggleHidden);
+
+        // Inside an ignored directory nothing is hidden.
+        let _ = app.apply(Command::ToggleIgnored);
+        let _ = app.apply(Command::GoTop);
+        let _ = app.apply(Command::MoveDown(1)); // target
+        let _ = app.apply(Command::Open);
+        let _ = app.apply(Command::ToggleIgnored);
+        assert_eq!(app.current_pane().current_dir, tmp.path().join("target"));
+        assert!(app.current_pane().hide_ignored);
+        assert!(!app.current_pane().ignore_filter_active());
+        assert_eq!(names(&app), ["out"]);
+        assert_eq!(
+            app.message.as_ref().unwrap().text,
+            "Already inside an ignored directory"
+        );
+        let _ = app.apply(Command::MoveLeft);
+        assert!(!names(&app).contains(&"target".to_string()));
+
+        let _ = app.apply(Command::ToggleIgnored);
+        assert_eq!(
+            app.message.as_ref().unwrap().text,
+            "Showing git-ignored files"
+        );
+        assert_eq!(names(&app).len(), 9);
+    }
+
+    #[test]
+    fn toggle_ignored_outside_repo_reports_it() {
+        let tmp = abcd();
+        let mut app = app_in(tmp.path());
+        if app.current_pane().git.is_some() {
+            return;
+        }
+        let _ = app.apply(Command::ToggleIgnored);
+        assert!(!app.current_pane().hide_ignored);
+        assert_eq!(app.message.as_ref().unwrap().text, "Not a git repository");
     }
 }

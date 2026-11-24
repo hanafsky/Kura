@@ -71,21 +71,44 @@ pub fn apply_sort(pane: &mut crate::app::Pane, by: SortBy) {
     pane.resort();
 }
 
-/// Find the next entry matching `query` (case-insensitive) after `start`, wrapping around.
-pub fn find_match(entries: &[DirEntry], query: &str, start: usize) -> Option<usize> {
-    if query.is_empty() || entries.is_empty() {
+/// Where [`find_match`] looks for the next match, relative to the cursor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SearchFrom {
+    /// The cursor row first, then the rows after it (typing a query).
+    Here,
+    /// The rows after the cursor (`n`).
+    Next,
+    /// The rows before the cursor, going up (`N`).
+    Prev,
+}
+
+/// Find the entry whose name contains `query` (case-insensitive), starting
+/// from `cursor` in the given direction. The whole list is searched: the
+/// search wraps around past the last (or first) entry.
+pub fn find_match<S: AsRef<str>>(
+    names: &[S],
+    query: &str,
+    cursor: usize,
+    from: SearchFrom,
+) -> Option<usize> {
+    if query.is_empty() || names.is_empty() {
         return None;
     }
     let q = query.to_lowercase();
-    let total = entries.len();
-    for i in 1..=total {
-        let idx = (start + i) % total;
-        let name = entries[idx].file_name().to_string_lossy().to_lowercase();
-        if name.contains(&q) {
-            return Some(idx);
-        }
+    let total = names.len();
+    let cursor = cursor.min(total - 1);
+    let matches = |idx: usize| names[idx].as_ref().to_lowercase().contains(&q);
+    match from {
+        SearchFrom::Here => (0..total)
+            .map(|i| (cursor + i) % total)
+            .find(|&i| matches(i)),
+        SearchFrom::Next => (1..=total)
+            .map(|i| (cursor + i) % total)
+            .find(|&i| matches(i)),
+        SearchFrom::Prev => (1..=total)
+            .map(|i| (cursor + total - i) % total)
+            .find(|&i| matches(i)),
     }
-    None
 }
 
 /// Build the `n`-th "copy" variant of a file name: `name (copy).ext` for
@@ -273,6 +296,23 @@ pub fn ensure_rename_target_free(old: &Path, new: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn find_match_searches_the_whole_list_and_wraps() {
+        let names = ["apple", "Banana", "cherry", "grape", "bread"];
+        // Typing a query keeps the cursor when it still matches.
+        assert_eq!(find_match(&names, "an", 1, SearchFrom::Here), Some(1));
+        // Matches before the cursor are found too (wrap-around).
+        assert_eq!(find_match(&names, "app", 3, SearchFrom::Here), Some(0));
+        assert_eq!(find_match(&names, "AN", 1, SearchFrom::Next), Some(1)); // only match
+        assert_eq!(find_match(&names, "r", 2, SearchFrom::Next), Some(3));
+        assert_eq!(find_match(&names, "r", 4, SearchFrom::Next), Some(2)); // past the end
+        assert_eq!(find_match(&names, "r", 3, SearchFrom::Prev), Some(2));
+        assert_eq!(find_match(&names, "r", 2, SearchFrom::Prev), Some(4)); // past the top
+        assert_eq!(find_match(&names, "zzz", 0, SearchFrom::Next), None);
+        assert_eq!(find_match(&names, "", 0, SearchFrom::Here), None);
+        assert_eq!(find_match::<&str>(&[], "a", 0, SearchFrom::Here), None);
+    }
     use std::collections::HashSet;
     use std::os::unix::fs::symlink;
 

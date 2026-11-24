@@ -158,6 +158,19 @@ impl GitStatus {
         }
     }
 
+    /// Whether the shown directory itself is ignored (or inside an ignored
+    /// directory), e.g. `target/`. Everything listed there is ignored too.
+    pub fn in_ignored_dir(&self) -> bool {
+        let mut dir = self.prefix.trim_end_matches('/');
+        while !dir.is_empty() {
+            if self.entries.get(dir) == Some(&FileStatus::Ignored) {
+                return true;
+            }
+            dir = dir.rfind('/').map_or("", |idx| &dir[..idx]);
+        }
+        false
+    }
+
     /// Status of the entry `name` in the shown directory.
     pub fn lookup(&self, name: &str, is_dir: bool) -> Option<FileStatus> {
         let path = format!("{}{}", self.prefix, name);
@@ -304,6 +317,16 @@ mod tests {
         assert_eq!(st.lookup("f", false), Some(FileStatus::Untracked));
         let st = parse("# branch.head main|! target/|", "target/x/\n");
         assert_eq!(st.lookup("t", false), Some(FileStatus::Ignored));
+    }
+
+    #[test]
+    fn in_ignored_dir_checks_the_shown_directory_and_its_parents() {
+        let st = parse("# branch.head main|! target/|", "target/x/\n");
+        assert!(st.in_ignored_dir());
+        let st = parse("# branch.head main|! target/|", "target/\n");
+        assert!(st.in_ignored_dir());
+        assert!(!parse(ROOT, "\n").in_ignored_dir());
+        assert!(!parse(ROOT, "un/\n").in_ignored_dir()); // untracked, not ignored
     }
 
     #[test]
