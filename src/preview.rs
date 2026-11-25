@@ -15,6 +15,18 @@
 //!   [`CACHE_BYTES`]; the cache is dropped when the preview is closed.
 //! - The encoding depends on the pane size. When it changes, the decoded image
 //!   kept in the protocol is re-encoded on a worker (no decoding again).
+//!
+//! [`Previewer`] does not depend on the app mode or the file list, so any
+//! view can own one (the `Enter` gallery uses `App::preview`):
+//!
+//! 1. [`Previewer::show`] with the path to show and the paths to prefetch
+//!    ([`prefetch_around`] picks them from a list).
+//! 2. In the event loop, [`Previewer::poll`] takes finished work (redraw when
+//!    it returns true); poll more often while [`Previewer::busy`].
+//! 3. [`Previewer::draw`] draws it with a titled border, or
+//!    [`Previewer::draw_body`] draws only the image and info lines into an
+//!    area. The size drawn into is what the workers encode for.
+//! 4. [`Previewer::close`] when it is no longer shown.
 
 use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -476,8 +488,17 @@ impl Previewer {
         ));
         let inner = block.inner(area);
         f.render_widget(block, area);
-        self.queue.lock().area = Some(inner.as_size());
+        self.draw_body(f, inner);
+    }
 
+    /// Draw the shown preview's image ("Loading…" until it is ready) and
+    /// info lines into `inner`, without a border or title.
+    pub fn draw_body(&mut self, f: &mut Frame, inner: Rect) {
+        let Some(path) = self.current().map(Path::to_path_buf) else {
+            return;
+        };
+        self.queue.lock().area = Some(inner.as_size());
+        let entry = self.entries.iter_mut().find(|e| e.path == path);
         let Some(entry) = entry else {
             draw_loading(f, inner);
             return;
