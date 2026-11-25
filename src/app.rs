@@ -601,6 +601,17 @@ impl App {
     /// the path is not a previewable media file. The preview loads in the
     /// background (see [`crate::preview`]).
     pub fn open_preview(&mut self, path: &std::path::Path) -> bool {
+        if !self.show_media(path) {
+            return false;
+        }
+        self.mode = Mode::Preview;
+        true
+    }
+
+    /// Show `path` in [`App::preview`] and prefetch the media entries
+    /// around the cursor. False if `path` is not an image / video. Cheap to
+    /// repeat: cached entries are reused unless their file changed.
+    fn show_media(&mut self, path: &std::path::Path) -> bool {
         if !media::is_media(path) || path.is_dir() {
             return false;
         }
@@ -611,36 +622,47 @@ impl App {
             .map(|i| pane.items[i].path())
             .collect();
         self.preview.show(path.to_path_buf(), prefetch);
-        self.mode = Mode::Preview;
         true
     }
 
-    /// `P`: turn the text preview in the opposite pane on or off.
+    /// `P`: turn the pane preview in the opposite pane on or off.
     pub fn toggle_text_preview(&mut self) {
         self.text_preview = match self.text_preview {
-            Some(_) => None,
+            Some(_) => {
+                // Turned off from the file list, so the gallery is not open.
+                self.preview.close();
+                None
+            }
             None => Some(PanePreview::new()),
         };
         self.sync_text_preview();
     }
 
-    /// Load the entry under the cursor into the text preview, if it is on
-    /// and the entry changed. Called before every draw.
+    /// Whether the `P` pane preview shows an image / video (drawn by
+    /// [`App::preview`]) rather than text.
+    pub fn pane_preview_shows_media(&self) -> bool {
+        self.text_preview.is_some() && self.preview.current().is_some()
+    }
+
+    /// Load the entry under the cursor into the pane preview, if it is on
+    /// and the entry changed. Called before every draw. Images / videos
+    /// load in the background in [`App::preview`] (shared with the `Enter`
+    /// gallery); other entries are read as text.
     pub fn sync_text_preview(&mut self) {
+        if self.text_preview.is_none() || matches!(self.mode, Mode::Preview) {
+            return;
+        }
         let path = self.selected_path();
+        let is_media = path.as_deref().is_some_and(|p| self.show_media(p));
+        if !is_media {
+            self.preview.hide();
+        }
         let mut error = None;
         if let Some(preview) = self.text_preview.as_mut() {
             preview.sync(path.as_deref(), |p| {
-                // Placeholder until images / videos are shown here too (after #51).
-                let placeholder = if media::is_image(p) {
-                    "Image: press Enter to view"
-                } else if media::is_video(p) {
-                    "Video: press Enter to view"
-                } else {
-                    ""
-                };
-                if !placeholder.is_empty() {
-                    return PreviewContent::Message(placeholder.to_string());
+                if is_media {
+                    // Shown by `App::preview`; nothing to read here.
+                    return PreviewContent::Message(String::new());
                 }
                 text_view::load_preview(p).unwrap_or_else(|e| {
                     error = Some(e.clone());
@@ -653,8 +675,12 @@ impl App {
         }
     }
 
+    /// Leave the `Enter` gallery. With `P` on, the pane preview keeps the
+    /// loader and cache and goes on showing the entry under the cursor.
     pub fn close_preview(&mut self) {
-        self.preview.close();
+        if self.text_preview.is_none() {
+            self.preview.close();
+        }
         self.mode = Mode::Filer;
     }
 
