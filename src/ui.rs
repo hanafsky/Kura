@@ -15,12 +15,14 @@ use crate::{
     media::Preview,
     mode::Mode,
     mode::PaneType,
+    text_view::{self, PreviewContent},
     watch::{self, Recency},
 };
 use std::time::SystemTime;
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthStr;
 
 pub fn ui(f: &mut Frame, app: &mut App) {
+    app.sync_text_preview();
     let size = f.area();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -57,78 +59,11 @@ pub fn ui(f: &mut Frame, app: &mut App) {
         (chunks[1], None)
     };
 
-    if let Mode::Viewer {
-        content,
-        title,
-        offset,
-        diff,
-    } = &app.mode
-    {
-        let block = Block::default().borders(Borders::ALL).title(title.as_str());
-        // available rows and margin width
-        let inner_height = content_area.height.saturating_sub(2) as usize;
-        let number_width = inner_height.to_string().len().max(1);
-        // wrap each content line into display rows of at most (width - margin) cols
-        let text_width = content_area.width.saturating_sub((number_width + 1) as u16) as usize;
-        // diff lines are coloured by kind; wrapped rows keep their line's colour
-        let kinds = if *diff {
-            crate::diff::classify_lines(content)
-        } else {
-            Vec::new()
-        };
-        let mut rows: Vec<(String, Style)> = Vec::new();
-        for (i, line) in content.lines().enumerate() {
-            let style = kinds.get(i).map_or(Style::default(), |&k| diff_style(k));
-            // if the line fits, push as-is
-            if UnicodeWidthStr::width(line) <= text_width {
-                rows.push((line.to_string(), style));
-            } else {
-                let mut s = line;
-                // break into segments that fit
-                while UnicodeWidthStr::width(s) > text_width {
-                    let mut w = 0;
-                    let mut end = 0;
-                    for (i, ch) in s.char_indices() {
-                        let cw = ch.width().unwrap_or(0);
-                        if w + cw > text_width {
-                            break;
-                        }
-                        w += cw;
-                        end = i + ch.len_utf8();
-                    }
-                    if end == 0 {
-                        let first = s.chars().next().unwrap();
-                        let len = first.len_utf8();
-                        rows.push((s[..len].to_string(), style));
-                        s = &s[len..];
-                    } else {
-                        rows.push((s[..end].to_string(), style));
-                        s = &s[end..];
-                    }
-                }
-                if !s.is_empty() {
-                    rows.push((s.to_string(), style));
-                }
-            }
-        }
-        let total_rows = rows.len();
-        let max_off = total_rows.saturating_sub(inner_height);
-        let start = (*offset as usize).min(max_off);
-        let numbered: Vec<Line> = rows
-            .iter()
-            .skip(start)
-            .take(inner_height)
-            .enumerate()
-            .map(|(i, (row, style))| {
-                let num = format!("{:>width$} ", i, width = number_width);
-                Line::from(vec![
-                    Span::styled(num, Style::default().fg(Color::DarkGray)),
-                    Span::styled(row.as_str(), *style),
-                ])
-            })
-            .collect();
-        let paragraph = Paragraph::new(numbered).block(block);
-        f.render_widget(paragraph, content_area);
+    if let Mode::Viewer { doc, offset, .. } = &app.mode {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(doc.title.as_str());
+        text_view::draw(f, content_area, block, doc, *offset);
     } else {
         let panes = Layout::default()
             .direction(Direction::Horizontal)
@@ -146,6 +81,19 @@ pub fn ui(f: &mut Frame, app: &mut App) {
                 let pane = if left_active { &app.left } else { &app.right };
                 draw_pane(f, pane_area, pane, true, app.session_start);
                 draw_preview(f, preview_area, preview);
+            }
+            // Text preview (`P`) of the entry under the cursor.
+            (_, _) if app.text_preview.is_some() => {
+                let (pane_area, preview_area) = if left_active {
+                    (panes[0], panes[1])
+                } else {
+                    (panes[1], panes[0])
+                };
+                let pane = if left_active { &app.left } else { &app.right };
+                draw_pane(f, pane_area, pane, true, app.session_start);
+                if let Some(preview) = &app.text_preview {
+                    draw_text_preview(f, preview_area, &preview.content);
+                }
             }
             _ => {
                 draw_pane(f, panes[0], &app.left, left_active, app.session_start);
@@ -210,18 +158,6 @@ pub fn ui(f: &mut Frame, app: &mut App) {
         };
         let paragraph = Paragraph::new(prompt);
         f.render_widget(paragraph, footer);
-    }
-}
-
-/// Colour of a diff line in the diff viewer.
-fn diff_style(kind: crate::diff::LineKind) -> Style {
-    use crate::diff::LineKind;
-    match kind {
-        LineKind::Header => Style::default().add_modifier(Modifier::BOLD),
-        LineKind::Hunk => Style::default().fg(Color::Cyan),
-        LineKind::Added => Style::default().fg(Color::Green),
-        LineKind::Removed => Style::default().fg(Color::Red),
-        LineKind::Context => Style::default(),
     }
 }
 
@@ -399,6 +335,31 @@ fn draw_pane(f: &mut Frame, area: Rect, pane: &Pane, active: bool, session_start
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
         .highlight_symbol(">> ");
     f.render_stateful_widget(list, area, &mut state);
+}
+
+/// Text preview pane (`P`): the file's first lines, or why there are none.
+fn draw_text_preview(f: &mut Frame, area: Rect, content: &PreviewContent) {
+    let title = match content {
+        PreviewContent::Text(doc) => doc.title.as_str(),
+        PreviewContent::Message(_) => "Preview",
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(Span::styled(
+            format!(" {title} "),
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .title_bottom(Line::from(" P: close preview ").right_aligned());
+    match content {
+        PreviewContent::Text(doc) => text_view::draw(f, area, block, doc, 0),
+        PreviewContent::Message(msg) => f.render_widget(
+            Paragraph::new(Span::styled(msg.as_str(), Style::default().fg(Color::Gray)))
+                .block(block),
+            area,
+        ),
+    }
 }
 
 fn draw_preview(f: &mut Frame, area: Rect, preview: &mut Preview) {
