@@ -610,14 +610,22 @@ impl App {
     /// and the entry changed. Called before every draw.
     pub fn sync_text_preview(&mut self) {
         let path = self.selected_path();
+        let mut error = None;
         if let Some(preview) = self.text_preview.as_mut() {
             preview.sync(path.as_deref(), |p| {
                 if media::is_image(p) || media::is_video(p) {
-                    PreviewContent::Message("Image / video: press Enter to preview".to_string())
-                } else {
-                    text_view::load_preview(p)
+                    return PreviewContent::Message(
+                        "Image / video: press Enter to preview".to_string(),
+                    );
                 }
+                text_view::load_preview(p).unwrap_or_else(|e| {
+                    error = Some(e.clone());
+                    PreviewContent::Message(e)
+                })
             });
+        }
+        if let Some(e) = error {
+            self.notify_error(e);
         }
     }
 

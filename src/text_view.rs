@@ -249,16 +249,40 @@ pub fn visible_rows(doc: &TextDoc, width: u16, height: u16, offset: u16) -> Vec<
     let height = height as usize;
     let number_width = height.to_string().len().max(1);
     let text_width = (width as usize).saturating_sub(number_width + 1);
-    let rows: Vec<Line> = doc
-        .lines
-        .iter()
-        .flat_map(|l| wrap_line(l, text_width))
-        .collect();
-    let max_off = rows.len().saturating_sub(height);
-    let start = (offset as usize).min(max_off);
+    // Only the lines on screen are wrapped, so scrolling stays fast in
+    // large files: skip whole lines by counting their rows first.
+    let mut skip = offset as usize;
+    let mut first = doc.lines.len();
+    for (i, line) in doc.lines.iter().enumerate() {
+        let n = row_count(line, text_width);
+        if skip < n {
+            first = i;
+            break;
+        }
+        skip -= n;
+    }
+    let mut rows = Vec::new();
+    for line in &doc.lines[first..] {
+        rows.extend(wrap_line(line, text_width));
+        if rows.len() >= skip + height {
+            break;
+        }
+    }
+    let mut rows: Vec<Line> = rows.into_iter().skip(skip).take(height).collect();
+    if rows.len() < height {
+        // Scrolled past the end: show the last full page.
+        let mut tail: Vec<Line> = Vec::new();
+        for line in doc.lines.iter().rev() {
+            let mut wrapped = wrap_line(line, text_width);
+            wrapped.append(&mut tail);
+            tail = wrapped;
+            if tail.len() >= height {
+                break;
+            }
+        }
+        rows = tail.split_off(tail.len().saturating_sub(height));
+    }
     rows.into_iter()
-        .skip(start)
-        .take(height)
         .enumerate()
         .map(|(i, row)| {
             let mut spans = vec![Span::styled(
@@ -269,6 +293,27 @@ pub fn visible_rows(doc: &TextDoc, width: u16, height: u16, offset: u16) -> Vec<
             Line::from(spans)
         })
         .collect()
+}
+
+/// Number of rows [`wrap_line`] makes of `line`, without building them.
+pub fn row_count(line: &Line, width: usize) -> usize {
+    // A character is never wider than its UTF-8 length, so a line with no
+    // more bytes than columns fits in one row (the common case).
+    let bytes: usize = line.spans.iter().map(|s| s.content.len()).sum();
+    if bytes <= width {
+        return 1;
+    }
+    let mut rows = 1;
+    let mut row_width = 0;
+    for ch in line.spans.iter().flat_map(|s| s.content.chars()) {
+        let cw = ch.width().unwrap_or(0);
+        if row_width + cw > width && row_width > 0 {
+            rows += 1;
+            row_width = 0;
+        }
+        row_width += cw;
+    }
+    rows
 }
 
 /// Draw `doc` inside `block`, scrolled by `offset` display rows. The
@@ -343,15 +388,16 @@ pub fn decode_prefix(bytes: &[u8]) -> Option<&str> {
     (!looks_binary(text)).then_some(text)
 }
 
-/// Load the start of `path` for the pane preview.
-pub fn load_preview(path: &Path) -> PreviewContent {
+/// Load the start of `path` for the pane preview. A read error is returned
+/// as `Err` with the status-line message.
+pub fn load_preview(path: &Path) -> Result<PreviewContent, String> {
     use std::io::Read;
     let title = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
     if path.is_dir() {
-        return PreviewContent::Message("Directory".to_string());
+        return Ok(PreviewContent::Message("Directory".to_string()));
     }
     let mut bytes = Vec::new();
     let read = std::fs::File::open(path).and_then(|f| {
@@ -360,12 +406,12 @@ pub fn load_preview(path: &Path) -> PreviewContent {
             .map(|_| ())
     });
     if let Err(e) = read {
-        return PreviewContent::Message(crate::app::fs_error_message(&e, path));
+        return Err(crate::app::fs_error_message(&e, path));
     }
-    match decode_prefix(&bytes) {
+    Ok(match decode_prefix(&bytes) {
         Some(text) => PreviewContent::Text(TextDoc::for_file(title, path, text)),
         None => PreviewContent::Message("Binary file".to_string()),
-    }
+    })
 }
 
 #[cfg(test)]
@@ -500,6 +546,45 @@ mod tests {
     }
 
     #[test]
+    fn row_count_matches_wrap_line() {
+        let lines = [
+            Line::raw(""),
+            Line::raw("abc"),
+            Line::raw("abcdefghij"),
+            Line::raw("日本語のテキスト"),
+            Line::from(vec![Span::raw("ab"), Span::raw("日本"), Span::raw("cdefg")]),
+        ];
+        for line in &lines {
+            for width in 0..12 {
+                assert_eq!(
+                    row_count(line, width),
+                    wrap_line(line, width).len(),
+                    "{line} at {width}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn visible_rows_scrolls_by_wrapped_rows() {
+        // Width 6 leaves 4 columns for text after "0 " / "1 " numbers.
+        let doc = TextDoc::plain("t".into(), "abcdefgh\nij\nkl\n");
+        let texts = |off| {
+            visible_rows(&doc, 6, 2, off)
+                .iter()
+                .map(text_of)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(texts(0), ["0 abcd", "1 efgh"]);
+        assert_eq!(texts(1), ["0 efgh", "1 ij"]);
+        assert_eq!(texts(2), ["0 ij", "1 kl"]);
+        assert_eq!(texts(50), ["0 ij", "1 kl"]);
+        let short = TextDoc::plain("t".into(), "x\n");
+        let rows = visible_rows(&short, 6, 3, 5);
+        assert_eq!(rows.iter().map(text_of).collect::<Vec<_>>(), ["0 x"]);
+    }
+
+    #[test]
     fn visible_rows_numbers_relative_rows_and_clamps_offset() {
         let doc = TextDoc::plain("t".into(), "a\nb\nc\nd\n");
         let rows = visible_rows(&doc, 10, 2, 1);
@@ -521,7 +606,7 @@ mod tests {
         for path in [&a, &a, &b, &b, &a] {
             p.sync(Some(path), |path| {
                 loads += 1;
-                load_preview(path)
+                load_preview(path).unwrap()
             });
         }
         assert_eq!(loads, 3);
@@ -533,14 +618,19 @@ mod tests {
     #[test]
     fn load_preview_reports_directories_and_binary_files() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(matches!(load_preview(dir.path()), PreviewContent::Message(m) if m == "Directory"));
+        assert!(
+            matches!(load_preview(dir.path()).unwrap(), PreviewContent::Message(m) if m == "Directory")
+        );
         let bin = dir.path().join("x.bin");
         std::fs::write(&bin, [0u8, 159, 146, 150]).unwrap();
-        assert!(matches!(load_preview(&bin), PreviewContent::Message(m) if m == "Binary file"));
+        assert!(
+            matches!(load_preview(&bin).unwrap(), PreviewContent::Message(m) if m == "Binary file")
+        );
         let py = dir.path().join("tool");
         std::fs::write(&py, "#!/usr/bin/env python3\nprint(1)\n").unwrap();
+        assert!(load_preview(&dir.path().join("missing")).is_err());
         assert!(matches!(
-            load_preview(&py),
+            load_preview(&py).unwrap(),
             PreviewContent::Text(d) if d.renderer == Renderer::Syntax("Python".into())
         ));
     }
