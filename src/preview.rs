@@ -104,11 +104,24 @@ pub fn image_area(inner: Rect, info_lines: usize) -> Rect {
 
 /// Encode `protocol` for the image area `area`, exactly as the
 /// `StatefulImage` widget would when drawing it into the fitted rect (so the
-/// draw does not encode again on the UI thread).
-fn encode_for(protocol: &mut StatefulProtocol, area: Size) {
+/// draw does not encode again on the UI thread). An empty area is skipped
+/// (nothing is drawn there).
+fn encode_for(protocol: &mut StatefulProtocol, area: Size) -> Result<(), String> {
+    if area.width == 0 || area.height == 0 {
+        return Ok(());
+    }
     let fitted = protocol.size_for(RESIZE, area);
-    if let Some(size) = protocol.needs_resize(&RESIZE, fitted) {
-        protocol.resize_encode(&RESIZE, size);
+    match protocol.needs_resize(&RESIZE, fitted) {
+        Some(size) => encode(protocol, size),
+        None => Ok(()),
+    }
+}
+
+fn encode(protocol: &mut StatefulProtocol, size: Size) -> Result<(), String> {
+    protocol.resize_encode(&RESIZE, size);
+    match protocol.last_encoding_result() {
+        Some(Err(e)) => Err(format!("Cannot encode image: {e}")),
+        _ => Ok(()),
     }
 }
 
@@ -153,7 +166,8 @@ enum Done {
     Encoded {
         path: PathBuf,
         token: u64,
-        protocol: Box<StatefulProtocol>,
+        /// The encoded protocol, or why encoding failed.
+        result: Result<Box<StatefulProtocol>, String>,
     },
 }
 
@@ -261,18 +275,22 @@ fn run_job(job: Job, picker: &Picker, queue: &Queue) -> (PathBuf, Option<Done>) 
             let stamp = stamp(&path);
             let done = media::load(&path).map(|loaded| {
                 let bytes = loaded.image.as_ref().map_or(0, |i| i.as_bytes().len() * 2);
+                let mut info = loaded.info;
                 let image = match loaded.image {
                     Some(img) => {
                         let mut protocol = picker.new_resize_protocol(img);
                         let area = queue.lock().area;
-                        if let Some(area) = area {
+                        let encoded = area.map_or(Ok(()), |area| {
                             let inner = Rect::new(0, 0, area.width, area.height);
-                            encode_for(
-                                &mut protocol,
-                                image_area(inner, loaded.info.len()).as_size(),
-                            );
+                            encode_for(&mut protocol, image_area(inner, info.len()).as_size())
+                        });
+                        match encoded {
+                            Ok(()) => Image::Ready(Box::new(protocol)),
+                            Err(e) => {
+                                info.push(e);
+                                Image::None
+                            }
                         }
-                        Image::Ready(Box::new(protocol))
                     }
                     None => Image::None,
                 };
@@ -280,7 +298,7 @@ fn run_job(job: Job, picker: &Picker, queue: &Queue) -> (PathBuf, Option<Done>) 
                     path: path.clone(),
                     stamp,
                     title: loaded.title,
-                    info: loaded.info,
+                    info,
                     image,
                     bytes,
                 }))
@@ -293,11 +311,11 @@ fn run_job(job: Job, picker: &Picker, queue: &Queue) -> (PathBuf, Option<Done>) 
             mut protocol,
             size,
         } => {
-            protocol.resize_encode(&RESIZE, size);
+            let result = encode(&mut protocol, size).map(|()| protocol);
             let done = Done::Encoded {
                 path: path.clone(),
                 token,
-                protocol,
+                result,
             };
             (path, Some(done))
         }
@@ -401,12 +419,18 @@ impl Previewer {
                 Done::Encoded {
                     path,
                     token,
-                    protocol,
+                    result,
                 } => {
                     if let Some(e) = self.entries.iter_mut().find(|e| {
                         e.path == path && matches!(e.image, Image::Encoding(t) if t == token)
                     }) {
-                        e.image = Image::Ready(protocol);
+                        e.image = match result {
+                            Ok(protocol) => Image::Ready(protocol),
+                            Err(msg) => {
+                                e.info.push(msg);
+                                Image::None
+                            }
+                        };
                     }
                 }
             }
@@ -459,7 +483,9 @@ impl Previewer {
             return;
         };
         let img_area = image_area(inner, entry.info.len());
-        if let Image::Ready(protocol) = &entry.image {
+        // No room for the image (e.g. a low pane filled by video info).
+        let room = img_area.width > 0 && img_area.height > 0;
+        if let (Image::Ready(protocol), true) = (&entry.image, room) {
             let fitted = protocol.size_for(RESIZE, img_area.as_size());
             // The pane size changed: re-encode on a worker instead of in
             // the widget (which would block the UI thread).
@@ -479,7 +505,7 @@ impl Previewer {
             }
         }
         match &mut entry.image {
-            Image::Ready(protocol) => {
+            Image::Ready(protocol) if room => {
                 // Center the fitted image inside the available area.
                 let fitted = protocol.size_for(RESIZE, img_area.as_size());
                 let x = img_area.x + img_area.width.saturating_sub(fitted.width) / 2;
@@ -492,7 +518,7 @@ impl Previewer {
                 );
             }
             Image::Encoding(_) => draw_loading(f, img_area),
-            Image::None => {}
+            Image::Ready(_) | Image::None => {}
         }
 
         let lines: Vec<Line> = entry
@@ -600,9 +626,17 @@ mod tests {
         assert!(protocol
             .needs_resize(&RESIZE, protocol.size_for(RESIZE, area))
             .is_some());
-        encode_for(&mut protocol, area);
+        encode_for(&mut protocol, area).unwrap();
         let fitted = protocol.size_for(RESIZE, area);
         assert_eq!(protocol.needs_resize(&RESIZE, fitted), None);
+    }
+
+    #[test]
+    fn empty_area_is_not_encoded() {
+        let picker = Picker::halfblocks();
+        let mut protocol = picker.new_resize_protocol(image::DynamicImage::new_rgb8(30, 20));
+        encode_for(&mut protocol, Size::new(40, 0)).unwrap();
+        assert!(protocol.last_encoding_result().is_none());
     }
 
     fn write_png(dir: &Path, name: &str) -> PathBuf {
