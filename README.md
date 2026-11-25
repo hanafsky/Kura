@@ -9,6 +9,7 @@ A simple terminal-based two-pane file manager written in Rust using ratatui and 
 - Image preview in the opposite pane (png, jpeg, gif, bmp, tiff, webp; heic/avif via ffmpeg), rendered with the Kitty / Sixel / iTerm2 graphics protocols when available
 - Video preview: a thumbnail plus duration / codec / resolution info (requires `ffmpeg` and `ffprobe`)
 - Syntax highlighting in the text viewer and in the text preview of the opposite pane (`P`)
+- Rendered Markdown (headings, lists, quotes, tables, links, highlighted code blocks) in the text viewer and the text preview; `m` switches to the source
 
 ## Supported Platforms
 
@@ -101,6 +102,8 @@ sudo apt install ffmpeg
 
 - `Enter`: Enter the selected directory, open the text viewer for a text file, or show an image / video preview in the opposite pane. Press `Enter` (or `Esc` in preview) again to return to the file manager.
   The text viewer highlights source code; the language is detected from the file name / extension or the first line (shebang such as `#!/usr/bin/env python3`) and shown at the bottom left of the frame. Only the first 2000 lines are highlighted (the rest is shown plain) so large files open without a pause. Files that are not valid UTF-8 cannot be opened in the viewer, and text containing NUL bytes is shown without highlighting.
+- `m`: Switch a Markdown file (`.md`, `.markdown`) between the rendered view and its highlighted source, in the text viewer or in the text preview (`P`). Markdown opens rendered; the frame's bottom left shows which view is on. In the preview the choice is kept as the cursor moves to other files, and the status line shows `No Markdown shown` when there is nothing to switch.
+  The rendered view keeps the `#` marks of headings (levels 1–3 are coloured), shows list items with `•` / `◦` / `▪` or their number and indents nested lists, prefixes quotes with `│`, draws tables with box lines and columns aligned by display width (a table wider than the pane wraps), shows links as underlined text followed by the URL (images as `[image: alt]`), and highlights fenced code blocks by their language. Long lines wrap between words (Japanese between characters, without starting a row with `、` / `。`) and keep the list indent or quote bar.
 - `P`: Toggle a text preview of the entry under the cursor in the opposite pane. It follows the cursor as you move (`j` / `k`, search, …) while all file-list keys keep working; press `P` again to close it. Only the first 256 KiB of a file is read. Directories and binary files show a short note instead; images / videos show `Image: press Enter to view` (or `Video: …`) for now, so use `Enter` to view them. While the preview is open, `D` only shows `Close the preview first` in the status line, since the other pane's cursor is hidden.
 - `o`: Open the selected entry with the default application (`open` on macOS), e.g. play a video in QuickTime. Works in the file list and in preview.
   On WSL the path is converted with `wslpath -w` and opened by `explorer.exe`. Set `KURA_OPENER` to use another program; it is split on whitespace and run as `<program> <args...> <path>` (e.g. `KURA_OPENER="code -r"` → `code -r <path>`).

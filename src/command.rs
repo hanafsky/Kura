@@ -86,6 +86,9 @@ pub enum Command {
     /// Show or hide the text preview of the entry under the cursor in the
     /// opposite pane.
     ToggleTextPreview,
+    /// Switch a Markdown file between the rendered and the source view, in
+    /// the text viewer or in the text preview.
+    ToggleMarkdown,
     /// Re-read both panes from disk (also works with `KURA_WATCH=off`).
     Refresh,
     /// Sort by the highlighted option.
@@ -220,6 +223,7 @@ impl App {
             Command::Diff if filer => self.show_diff(),
             Command::Refresh if filer => self.refresh_all(),
             Command::ToggleTextPreview if filer => self.toggle_text_preview(),
+            Command::ToggleMarkdown => self.toggle_markdown(),
             Command::SortConfirm => {
                 if let Mode::Sort { selected } = self.mode {
                     self.mode = Mode::Filer;
@@ -304,6 +308,32 @@ impl App {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// `m`: rendered / source Markdown in the text viewer, or in the text
+    /// preview from the file list.
+    fn toggle_markdown(&mut self) {
+        let source = match &mut self.mode {
+            Mode::Viewer {
+                doc,
+                offset,
+                diff: false,
+            } => {
+                let switched = doc.toggle_markdown();
+                if switched {
+                    // Row offsets of the two views do not correspond.
+                    *offset = 0;
+                }
+                switched.then(|| doc.shows_markdown_source())
+            }
+            Mode::Filer => self.text_preview.as_mut().and_then(|p| p.toggle_markdown()),
+            _ => return,
+        };
+        match source {
+            Some(true) => self.notify_info("Markdown: source"),
+            Some(false) => self.notify_info("Markdown: rendered"),
+            None => self.notify_info("No Markdown shown"),
         }
     }
 
@@ -898,6 +928,78 @@ mod tests {
             }
             _ => panic!("not in the viewer"),
         }
+    }
+
+    fn viewer_doc(app: &App) -> &crate::text_view::TextDoc {
+        match &app.mode {
+            Mode::Viewer { doc, .. } => doc,
+            _ => panic!("not in the viewer"),
+        }
+    }
+
+    #[test]
+    fn viewer_switches_markdown_between_rendered_and_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("r.md"), "# Title\n\n- a\n- b\n").unwrap();
+        let mut app = app_in(tmp.path());
+        let _ = app.apply(Command::Open);
+        assert_eq!(viewer_doc(&app).renderer, Renderer::Markdown);
+        assert_eq!(viewer_doc(&app).lines[2].to_string(), "• a");
+        let _ = app.apply(Command::MoveDown(2));
+        let _ = app.apply(Command::ToggleMarkdown);
+        assert_eq!(message(&app), "Markdown: source");
+        assert!(matches!(app.mode, Mode::Viewer { offset: 0, .. }));
+        let doc = viewer_doc(&app);
+        assert_eq!(doc.renderer, Renderer::Syntax("Markdown".into()));
+        assert_eq!(doc.lines[2].to_string(), "- a");
+        let _ = app.apply(Command::ToggleMarkdown);
+        assert_eq!(message(&app), "Markdown: rendered");
+        assert_eq!(viewer_doc(&app).renderer, Renderer::Markdown);
+    }
+
+    #[test]
+    fn toggle_markdown_reports_when_there_is_no_markdown() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("m.rs"), "fn main() {}\n").unwrap();
+        let mut app = app_in(tmp.path());
+        // File list without the preview.
+        let _ = app.apply(Command::ToggleMarkdown);
+        assert_eq!(message(&app), "No Markdown shown");
+        app.message = None;
+        let _ = app.apply(Command::Open);
+        let _ = app.apply(Command::ToggleMarkdown);
+        assert_eq!(message(&app), "No Markdown shown");
+        assert_eq!(viewer_doc(&app).renderer, Renderer::Syntax("Rust".into()));
+    }
+
+    #[test]
+    fn text_preview_keeps_the_markdown_view_across_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("a.md"), "- a\n").unwrap();
+        fs::write(tmp.path().join("b.txt"), "b\n").unwrap();
+        fs::write(tmp.path().join("c.markdown"), "- c\n").unwrap();
+        let mut app = app_in(tmp.path());
+        let first_line = |app: &App| match app.text_preview.as_ref().map(|p| &p.content) {
+            Some(PreviewContent::Text(doc)) => doc.lines[0].to_string(),
+            _ => panic!("no text preview"),
+        };
+        let _ = app.apply(Command::ToggleTextPreview);
+        assert_eq!(first_line(&app), "• a");
+        let _ = app.apply(Command::ToggleMarkdown);
+        assert_eq!(message(&app), "Markdown: source");
+        assert_eq!(first_line(&app), "- a");
+        // A plain text file has nothing to switch.
+        let _ = app.apply(Command::MoveDown(1));
+        app.sync_text_preview();
+        let _ = app.apply(Command::ToggleMarkdown);
+        assert_eq!(message(&app), "No Markdown shown");
+        assert_eq!(first_line(&app), "b");
+        // The next Markdown file opens as source too.
+        let _ = app.apply(Command::MoveDown(1));
+        app.sync_text_preview();
+        assert_eq!(first_line(&app), "- c");
+        let _ = app.apply(Command::ToggleMarkdown);
+        assert_eq!(first_line(&app), "• c");
     }
 
     #[test]

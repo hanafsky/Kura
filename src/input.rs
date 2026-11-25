@@ -34,6 +34,7 @@ const FILER_KEYS: Bindings = &[
     (KeyCode::Char('y'), Command::Yank),
     (KeyCode::Char('p'), Command::Paste),
     (KeyCode::Char('P'), Command::ToggleTextPreview),
+    (KeyCode::Char('m'), Command::ToggleMarkdown),
     (KeyCode::Char('Y'), Command::CopyAtPaths),
     (KeyCode::Char('x'), Command::Delete(DeleteKind::Normal)),
     (KeyCode::Char('X'), Command::Delete(DeleteKind::Permanent)),
@@ -61,6 +62,7 @@ const VISUAL_KEYS: Bindings = &[
 const VIEWER_KEYS: Bindings = &[
     (KeyCode::Char('j'), Command::MoveDown(1)),
     (KeyCode::Char('k'), Command::MoveUp(1)),
+    (KeyCode::Char('m'), Command::ToggleMarkdown),
     (KeyCode::Enter, Command::Back),
 ];
 
@@ -664,5 +666,18 @@ mod tests {
         assert_eq!(run(&d, &[ch('D')]), []);
         // The plain text viewer keeps its keys.
         assert_eq!(run(&viewer(), &[ch('q')]), [Command::Quit]);
+    }
+
+    #[test]
+    fn m_switches_markdown_in_the_viewer_and_the_file_list() {
+        assert_eq!(run(&viewer(), &[ch('m')]), [Command::ToggleMarkdown]);
+        assert_eq!(run(&Mode::Filer, &[ch('m')]), [Command::ToggleMarkdown]);
+        // `M` stays the git filter; diffs and Visual mode ignore `m`.
+        assert_eq!(run(&Mode::Filer, &[ch('M')]), [Command::ToggleGitFilter]);
+        assert!(run(&diff_viewer(), &[ch('m')]).is_empty());
+        let visual = Mode::Visual {
+            anchor: PathBuf::from("/x"),
+        };
+        assert!(run(&visual, &[ch('m')]).is_empty());
     }
 }

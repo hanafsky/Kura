@@ -11,6 +11,7 @@ mod git;
 mod graphics;
 mod input;
 mod input_source;
+mod markdown;
 mod media;
 mod mode;
 mod paste;
