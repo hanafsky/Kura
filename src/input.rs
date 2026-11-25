@@ -75,6 +75,8 @@ const DIFF_KEYS: Bindings = &[
 
 /// Image / video preview.
 const PREVIEW_KEYS: Bindings = &[
+    (KeyCode::Char('j'), Command::MoveDown(1)),
+    (KeyCode::Char('k'), Command::MoveUp(1)),
     (KeyCode::Enter, Command::Back),
     (KeyCode::Esc, Command::Back),
     (KeyCode::Char('o'), Command::OpenExternal),
@@ -153,7 +155,9 @@ impl KeyState {
         }
 
         if let KeyCode::Char(c) = code {
-            if matches!(mode, Mode::Filer | Mode::Viewer { .. }) && c.is_ascii_digit() {
+            if matches!(mode, Mode::Filer | Mode::Viewer { .. } | Mode::Preview)
+                && c.is_ascii_digit()
+            {
                 self.prefix = self
                     .prefix
                     .saturating_mul(10)
@@ -193,10 +197,15 @@ impl KeyState {
 /// with `e` gets every key; the loop just wakes this often without drawing.
 const TICK: Duration = Duration::from_millis(200);
 
+/// Wait while a preview loads in the background, so it shows soon after it
+/// is ready (the worker threads cannot wake `event::poll`).
+const LOADING_TICK: Duration = Duration::from_millis(20);
+
 /// How long to wait for input: until the next highlight expires, at most
-/// [`TICK`].
-fn poll_timeout(highlight_expiry: Option<Duration>) -> Duration {
-    highlight_expiry.map_or(TICK, |d| d.min(TICK))
+/// [`TICK`] ([`LOADING_TICK`] while a preview loads).
+fn poll_timeout(highlight_expiry: Option<Duration>, loading: bool) -> Duration {
+    let tick = if loading { LOADING_TICK } else { TICK };
+    highlight_expiry.map_or(tick, |d| d.min(tick))
 }
 
 /// Main event loop: wait for a key, a directory change or the expiry of a
@@ -240,7 +249,7 @@ pub fn run_app<B: Backend<Error = io::Error> + Write>(
         }
         let expiry = app.next_highlight_expiry(SystemTime::now());
         let started = Instant::now();
-        if event::poll(poll_timeout(expiry))? {
+        if event::poll(poll_timeout(expiry, app.preview.busy()))? {
             match event::read()? {
                 Event::Key(key) => {
                     dirty = true;
@@ -254,6 +263,9 @@ pub fn run_app<B: Backend<Error = io::Error> + Write>(
         }
         while let Ok(fs_event) = fs_events.try_recv() {
             app.handle_fs_event(&fs_event);
+            dirty = true;
+        }
+        if app.preview.poll() {
             dirty = true;
         }
         if expiry.is_some_and(|d| started.elapsed() >= d) {
@@ -515,12 +527,13 @@ mod tests {
 
     #[test]
     fn poll_timeout_waits_for_the_next_highlight_expiry_at_most_a_tick() {
-        assert_eq!(poll_timeout(None), TICK);
+        assert_eq!(poll_timeout(None, false), TICK);
+        assert_eq!(poll_timeout(None, true), LOADING_TICK);
         assert_eq!(
-            poll_timeout(Some(Duration::from_millis(50))),
+            poll_timeout(Some(Duration::from_millis(50)), false),
             Duration::from_millis(50)
         );
-        assert_eq!(poll_timeout(Some(Duration::from_secs(9))), TICK);
+        assert_eq!(poll_timeout(Some(Duration::from_secs(9)), false), TICK);
     }
 
     #[test]
@@ -618,6 +631,17 @@ mod tests {
         assert_eq!(run(&viewer(), &[KeyCode::Esc]), []);
         assert_eq!(run(&Mode::Preview, &[KeyCode::Esc]), [Command::Back]);
         assert_eq!(run(&Mode::Preview, &[ch('o')]), [Command::OpenExternal]);
+        assert_eq!(run(&Mode::Preview, &[KeyCode::Enter]), [Command::Back]);
+        assert_eq!(run(&Mode::Preview, &[ch('j')]), [Command::MoveDown(1)]);
+        assert_eq!(run(&Mode::Preview, &[ch('k')]), [Command::MoveUp(1)]);
+        assert_eq!(
+            run(&Mode::Preview, &[ch('1'), ch('2'), ch('j')]),
+            [Command::MoveDown(12)]
+        );
+        assert_eq!(
+            run(&Mode::Preview, &[ch('3'), ch('k')]),
+            [Command::MoveUp(3)]
+        );
         let s = Mode::Sort { selected: 0 };
         assert_eq!(run(&s, &[KeyCode::Down]), [Command::MoveDown(1)]);
         assert_eq!(run(&s, &[ch('k')]), [Command::MoveUp(1)]);

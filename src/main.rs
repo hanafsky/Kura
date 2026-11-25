@@ -14,6 +14,7 @@ mod input_source;
 mod media;
 mod mode;
 mod paste;
+mod preview;
 mod terminal;
 mod text_view;
 mod ui;

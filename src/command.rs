@@ -10,13 +10,14 @@ use crate::actions::{
     copy_selection, delete_items, paste, rename_selected, resolve_paste_conflict, target_paths,
     toggle_mark,
 };
-use crate::app::{fs_error_message, App, Pane};
+use crate::app::{fs_error_message, media_flags, App, Pane};
 use crate::delete_confirm::DeleteKind;
 use crate::diff;
 use crate::fs_utils::{apply_sort, find_match, SearchFrom, SortBy, DIRS_FIRST_ROW, SORT_MENU_ROWS};
 use crate::media::open_external;
 use crate::mode::{Mode, PaneType};
 use crate::paste::ConflictChoice;
+use crate::preview::{prefetch_around, step_media};
 use crate::text_view::TextDoc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -24,7 +25,8 @@ pub enum Command {
     /// Exit kura.
     Quit,
     /// Move down `n` rows: the cursor (file list / Visual), the scroll
-    /// offset (text viewer) or the highlighted option (sort menu).
+    /// offset (text viewer), the highlighted option (sort menu) or to the
+    /// `n`-th next image / video (preview).
     MoveDown(usize),
     /// Move up `n` rows; see [`Command::MoveDown`].
     MoveUp(usize),
@@ -293,6 +295,7 @@ impl App {
                     offset.saturating_sub(n)
                 };
             }
+            Mode::Preview => self.preview_step(n, down),
             Mode::Sort { selected } => {
                 let len = SORT_MENU_ROWS;
                 for _ in 0..n {
@@ -304,6 +307,30 @@ impl App {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// `j` / `k` in the preview: show the `n`-th next / previous image or
+    /// video, moving the cursor along. Stops at the end of the list.
+    fn preview_step(&mut self, n: usize, down: bool) {
+        let pane = self.current_pane_mut();
+        let flags = media_flags(pane);
+        let (idx, steps) = step_media(&flags, pane.selected, n, down);
+        if steps > 0 {
+            pane.selected = idx;
+            let path = pane.items[idx].path();
+            let prefetch = prefetch_around(&flags, idx, down)
+                .into_iter()
+                .map(|i| pane.items[i].path())
+                .collect();
+            self.preview.show(path, prefetch);
+        }
+        if steps < n {
+            self.notify_info(if down {
+                "No next image or video"
+            } else {
+                "No previous image or video"
+            });
         }
     }
 
@@ -1544,5 +1571,108 @@ mod tests {
         let _ = app.apply(Command::Diff);
         assert!(matches!(app.mode, Mode::Filer));
         assert_eq!(message(&app), "No changes against HEAD");
+    }
+
+    /// A dir with images, videos, text files and a folder named like an image.
+    fn media_dir() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir(tmp.path().join("dir.png")).unwrap();
+        for name in ["a.png", "b.txt", "c.mp4", "d.md", "e.jpg", "f.txt"] {
+            fs::write(tmp.path().join(name), name).unwrap();
+        }
+        tmp
+    }
+
+    /// Open the preview on `name` (the list is sorted, dirs first).
+    fn preview_on(app: &mut App, name: &str) {
+        while selected_name(app) != name {
+            let _ = app.apply(Command::MoveDown(1));
+        }
+        let _ = app.apply(Command::Open);
+        assert!(matches!(app.mode, Mode::Preview));
+    }
+
+    fn shown(app: &App) -> String {
+        let p = app.preview.current().unwrap();
+        p.file_name().unwrap().to_string_lossy().into_owned()
+    }
+
+    fn wanted(app: &App) -> Vec<String> {
+        app.preview
+            .wanted()
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn open_preview_prefetches_the_neighbours() {
+        let tmp = media_dir();
+        let mut app = app_in(tmp.path());
+        preview_on(&mut app, "c.mp4");
+        assert_eq!(wanted(&app), ["c.mp4", "e.jpg", "a.png"]);
+    }
+
+    #[test]
+    fn preview_j_k_step_over_non_media_and_move_the_cursor() {
+        let tmp = media_dir();
+        let mut app = app_in(tmp.path());
+        preview_on(&mut app, "a.png");
+        let _ = app.apply(Command::MoveDown(1));
+        assert!(matches!(app.mode, Mode::Preview));
+        assert_eq!(selected_name(&app), "c.mp4");
+        assert_eq!(shown(&app), "c.mp4");
+        let _ = app.apply(Command::MoveDown(1));
+        assert_eq!(selected_name(&app), "e.jpg");
+        assert_eq!(shown(&app), "e.jpg");
+        // Going back prefetches in the direction of travel first.
+        let _ = app.apply(Command::MoveUp(1));
+        assert_eq!(wanted(&app), ["c.mp4", "a.png", "e.jpg"]);
+        assert!(app.message.is_none());
+    }
+
+    #[test]
+    fn preview_count_stops_at_the_end_and_reports_it() {
+        let tmp = media_dir();
+        let mut app = app_in(tmp.path());
+        preview_on(&mut app, "a.png");
+        let _ = app.apply(Command::MoveDown(5));
+        assert_eq!(selected_name(&app), "e.jpg");
+        assert_eq!(shown(&app), "e.jpg");
+        assert_eq!(message(&app), "No next image or video");
+
+        app.message = None;
+        let _ = app.apply(Command::MoveDown(1));
+        assert_eq!(selected_name(&app), "e.jpg");
+        assert_eq!(message(&app), "No next image or video");
+        assert!(matches!(app.mode, Mode::Preview));
+
+        let _ = app.apply(Command::MoveUp(2));
+        assert_eq!(selected_name(&app), "a.png");
+        app.message = None;
+        let _ = app.apply(Command::MoveUp(1));
+        assert_eq!(selected_name(&app), "a.png");
+        assert_eq!(message(&app), "No previous image or video");
+    }
+
+    #[test]
+    fn preview_closes_with_back() {
+        let tmp = media_dir();
+        let mut app = app_in(tmp.path());
+        preview_on(&mut app, "e.jpg");
+        let _ = app.apply(Command::Back);
+        assert!(matches!(app.mode, Mode::Filer));
+        assert_eq!(app.preview.current(), None);
+        assert_eq!(selected_name(&app), "e.jpg");
+    }
+
+    #[test]
+    fn folder_named_like_an_image_is_not_previewed() {
+        let tmp = media_dir();
+        let mut app = app_in(tmp.path());
+        assert_eq!(selected_name(&app), "dir.png");
+        let _ = app.apply(Command::Open);
+        assert!(matches!(app.mode, Mode::Filer));
+        assert_eq!(app.current_pane().current_dir, tmp.path().join("dir.png"));
     }
 }

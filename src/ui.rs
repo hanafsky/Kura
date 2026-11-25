@@ -6,13 +6,10 @@ use ratatui::{
     Frame,
 };
 
-use ratatui_image::{Resize, StatefulImage};
-
 use crate::{
     app::{App, MessageLevel, Pane},
     delete_confirm::{dialog_lines, dialog_title, DeleteKind},
     git::FileStatus,
-    media::Preview,
     mode::Mode,
     mode::PaneType,
     text_view::{self, PreviewContent},
@@ -70,9 +67,9 @@ pub fn ui(f: &mut Frame, app: &mut App) {
             .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
             .split(content_area);
         let left_active = app.active == PaneType::Left;
-        match (&mut app.preview, &app.mode) {
+        match &app.mode {
             // Preview replaces the pane opposite to the active one.
-            (Some(preview), Mode::Preview) => {
+            Mode::Preview => {
                 let (pane_area, preview_area) = if left_active {
                     (panes[0], panes[1])
                 } else {
@@ -80,10 +77,10 @@ pub fn ui(f: &mut Frame, app: &mut App) {
                 };
                 let pane = if left_active { &app.left } else { &app.right };
                 draw_pane(f, pane_area, pane, true, app.session_start);
-                draw_preview(f, preview_area, preview);
+                app.preview.draw(f, preview_area);
             }
             // Text preview (`P`) of the entry under the cursor.
-            (_, _) if app.text_preview.is_some() => {
+            _ if app.text_preview.is_some() => {
                 let (pane_area, preview_area) = if left_active {
                     (panes[0], panes[1])
                 } else {
@@ -151,7 +148,7 @@ pub fn ui(f: &mut Frame, app: &mut App) {
             Mode::Search { query } => format!("/{query}"),
             Mode::Rename { original, buffer } => format!("rename: {original} -> {buffer}"),
             Mode::Preview => format!(
-                "Enter/Esc: close preview   o: open in default app   [{}]",
+                "j/k: next/prev   Enter/Esc: close preview   o: open in default app   [{}]",
                 app.graphics_info
             ),
             _ => String::new(),
@@ -360,40 +357,6 @@ fn draw_text_preview(f: &mut Frame, area: Rect, content: &PreviewContent) {
             area,
         ),
     }
-}
-
-fn draw_preview(f: &mut Frame, area: Rect, preview: &mut Preview) {
-    let block = Block::default().borders(Borders::ALL).title(Span::styled(
-        format!(" {} ", preview.title),
-        Style::default()
-            .fg(Color::Magenta)
-            .add_modifier(Modifier::BOLD),
-    ));
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-
-    let info_height = (preview.info.len() as u16).min(inner.height);
-    let parts = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(0), Constraint::Length(info_height)])
-        .split(inner);
-
-    if let Some(image) = preview.image.as_mut() {
-        // Center the fitted image inside the available area.
-        let img_area = parts[0];
-        let fitted = image.size_for(Resize::Fit(None), img_area.as_size());
-        let x = img_area.x + img_area.width.saturating_sub(fitted.width) / 2;
-        let y = img_area.y + img_area.height.saturating_sub(fitted.height) / 2;
-        let centered = Rect::new(x, y, fitted.width, fitted.height);
-        f.render_stateful_widget(StatefulImage::default(), centered, image);
-    }
-
-    let lines: Vec<Line> = preview
-        .info
-        .iter()
-        .map(|l| Line::from(Span::styled(l.as_str(), Style::default().fg(Color::Gray))))
-        .collect();
-    f.render_widget(Paragraph::new(lines), parts[1]);
 }
 
 /// Helper to create a centered rect using the given percentage width and height of the available rect
