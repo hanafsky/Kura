@@ -6,6 +6,7 @@
 
 use crossterm::event::{self, Event, KeyCode};
 use ratatui::{backend::Backend, Terminal};
+use std::ops::ControlFlow;
 use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime};
 use std::{io, io::Write};
@@ -199,9 +200,12 @@ fn poll_timeout(highlight_expiry: Option<Duration>) -> Duration {
 
 /// Main event loop: wait for a key, a directory change or the expiry of a
 /// "just changed" highlight, and redraw only when one of them happened.
+/// `typeahead` are keys typed before the loop started (see
+/// [`crate::graphics::detect`]); they are handled first, in order.
 pub fn run_app<B: Backend<Error = io::Error> + Write>(
     terminal: &mut Terminal<B>,
     app: &mut App,
+    typeahead: Vec<KeyCode>,
 ) -> io::Result<()> {
     let (tx, fs_events) = mpsc::channel::<FsEvent>();
     let mode = watch::parse_watch_mode(std::env::var(watch::WATCH_ENV).ok().as_deref());
@@ -213,6 +217,11 @@ pub fn run_app<B: Backend<Error = io::Error> + Write>(
         }
     };
     let mut keys = KeyState::default();
+    for code in typeahead {
+        if handle_key(terminal, app, &mut keys, code)?.is_break() {
+            return Ok(());
+        }
+    }
     let mut dirty = true;
     loop {
         if let Some(w) = watcher.as_mut() {
@@ -234,16 +243,8 @@ pub fn run_app<B: Backend<Error = io::Error> + Write>(
             match event::read()? {
                 Event::Key(key) => {
                     dirty = true;
-                    // A status message stays until the next key press.
-                    app.message = None;
-                    if let Some(cmd) = keys.translate(&app.mode, key.code) {
-                        if app.apply(cmd).is_break() {
-                            return Ok(());
-                        }
-                        if let Some(path) = app.pending_edit.take() {
-                            // Changes made meanwhile are queued and handled below.
-                            crate::editor::edit(terminal, app, &path)?;
-                        }
+                    if handle_key(terminal, app, &mut keys, key.code)?.is_break() {
+                        return Ok(());
                     }
                 }
                 Event::Resize(..) => dirty = true,
@@ -258,6 +259,114 @@ pub fn run_app<B: Backend<Error = io::Error> + Write>(
             dirty = true;
         }
     }
+}
+
+/// Handle one key press; `Break` when the app should quit.
+fn handle_key<B: Backend<Error = io::Error> + Write>(
+    terminal: &mut Terminal<B>,
+    app: &mut App,
+    keys: &mut KeyState,
+    code: KeyCode,
+) -> io::Result<ControlFlow<()>> {
+    // A status message stays until the next key press.
+    app.message = None;
+    if let Some(cmd) = keys.translate(&app.mode, code) {
+        if app.apply(cmd).is_break() {
+            return Ok(ControlFlow::Break(()));
+        }
+        if let Some(path) = app.pending_edit.take() {
+            // Changes made meanwhile are queued and handled in the loop.
+            crate::editor::edit(terminal, app, &path)?;
+        }
+    }
+    Ok(ControlFlow::Continue(()))
+}
+
+/// Turn raw bytes typed before the event loop started into key presses.
+///
+/// Covers what is plausible right after launch: text (UTF-8), Enter, Tab,
+/// Backspace, Esc and the arrow / navigation keys. Modifiers are not kept
+/// (the key tables do not use them); other control bytes and unknown escape
+/// sequences are dropped rather than guessed at. Esc followed by a key is
+/// read as Esc, then that key.
+pub fn typeahead_keys(bytes: &[u8]) -> Vec<KeyCode> {
+    let mut keys = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        match b {
+            0x1b => {
+                let intro = bytes.get(i + 1).copied();
+                if matches!(intro, Some(b'[') | Some(b'O')) {
+                    let start = i + 2;
+                    let end = (start..bytes.len())
+                        .find(|&j| !(0x20..=0x3f).contains(&bytes[j]))
+                        .unwrap_or(bytes.len());
+                    if end < bytes.len() {
+                        if let Some(code) = csi_key(&bytes[start..end], bytes[end]) {
+                            keys.push(code);
+                        }
+                        i = end + 1;
+                        continue;
+                    }
+                }
+                keys.push(KeyCode::Esc);
+                i += 1;
+            }
+            b'\r' | b'\n' => {
+                keys.push(KeyCode::Enter);
+                i += 1;
+            }
+            b'\t' => {
+                keys.push(KeyCode::Tab);
+                i += 1;
+            }
+            0x7f | 0x08 => {
+                keys.push(KeyCode::Backspace);
+                i += 1;
+            }
+            0x00..=0x1f => i += 1,
+            _ => {
+                let len = match b {
+                    0xc0..=0xdf => 2,
+                    0xe0..=0xef => 3,
+                    0xf0..=0xf7 => 4,
+                    _ => 1,
+                };
+                let end = (i + len).min(bytes.len());
+                if let Some(c) = std::str::from_utf8(&bytes[i..end])
+                    .ok()
+                    .and_then(|s| s.chars().next())
+                {
+                    keys.push(KeyCode::Char(c));
+                    i = end;
+                } else {
+                    i += 1;
+                }
+            }
+        }
+    }
+    keys
+}
+
+/// Key for `ESC [ <params> <fin>` / `ESC O <fin>`.
+fn csi_key(params: &[u8], fin: u8) -> Option<KeyCode> {
+    Some(match (params, fin) {
+        (_, b'A') => KeyCode::Up,
+        (_, b'B') => KeyCode::Down,
+        (_, b'C') => KeyCode::Right,
+        (_, b'D') => KeyCode::Left,
+        (_, b'H') => KeyCode::Home,
+        (_, b'F') => KeyCode::End,
+        (_, b'Z') => KeyCode::BackTab,
+        (b"1" | b"7", b'~') => KeyCode::Home,
+        (b"2", b'~') => KeyCode::Insert,
+        (b"3", b'~') => KeyCode::Delete,
+        (b"4" | b"8", b'~') => KeyCode::End,
+        (b"5", b'~') => KeyCode::PageUp,
+        (b"6", b'~') => KeyCode::PageDown,
+        _ => return None,
+    })
 }
 
 #[cfg(test)]
@@ -354,6 +463,51 @@ mod tests {
         }
         assert_eq!(run(&f, &[ch('z')]), []);
         assert_eq!(run(&f, &[KeyCode::Down]), []);
+    }
+
+    #[test]
+    fn typeahead_decodes_text_and_common_keys() {
+        assert_eq!(
+            typeahead_keys("jé\r\t\x7f".as_bytes()),
+            [
+                ch('j'),
+                ch('é'),
+                KeyCode::Enter,
+                KeyCode::Tab,
+                KeyCode::Backspace
+            ]
+        );
+        assert_eq!(
+            typeahead_keys(b"\x1b[A\x1bOB\x1b[5~\x1b[3~\x1b[Z"),
+            [
+                KeyCode::Up,
+                KeyCode::Down,
+                KeyCode::PageUp,
+                KeyCode::Delete,
+                KeyCode::BackTab
+            ]
+        );
+    }
+
+    #[test]
+    fn typeahead_escape_control_and_unknown_bytes() {
+        // Lone Esc, and Esc followed by a key.
+        assert_eq!(typeahead_keys(b"\x1b"), [KeyCode::Esc]);
+        assert_eq!(typeahead_keys(b"\x1bq"), [KeyCode::Esc, ch('q')]);
+        // Other control bytes, unknown sequences and broken UTF-8 are dropped.
+        assert_eq!(typeahead_keys(b"\x03\x1b[99~\xffk"), [ch('k')]);
+        // A truncated sequence keeps its Esc and the rest as text.
+        assert_eq!(typeahead_keys(b"\x1b[1"), [KeyCode::Esc, ch('['), ch('1')]);
+    }
+
+    #[test]
+    fn typeahead_q_quits_like_a_normal_key_press() {
+        // The bytes left over after the terminal replies were split off.
+        let scan = crate::graphics::split_replies(b"q\x1b[?62;4c\x1b[0n");
+        let keys = typeahead_keys(&scan.input);
+        assert_eq!(run(&Mode::Filer, &keys), [Command::Quit]);
+        let scan = crate::graphics::split_replies(b"\x1b[0nj2");
+        assert_eq!(typeahead_keys(&scan.input), [ch('j'), ch('2')]);
     }
 
     #[test]
