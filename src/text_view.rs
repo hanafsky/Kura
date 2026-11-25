@@ -105,9 +105,10 @@ impl TextDoc {
     /// Markdown shown rendered; [`TextDoc::toggle_markdown`] switches to
     /// the source.
     pub fn markdown(title: String, text: &str) -> Self {
-        let mut doc = Self::new(title, Renderer::Markdown, Vec::new());
+        let rendered = crate::markdown::render(text);
+        let mut doc = Self::new(title, Renderer::Markdown, rendered.lines);
+        doc.hangs = rendered.hangs;
         doc.markdown_source = Some(text.to_string());
-        doc.show_markdown_source(false);
         doc
     }
 
@@ -134,6 +135,9 @@ impl TextDoc {
     /// Show a Markdown file rendered (`false`) or as source (`true`).
     /// Does nothing for other documents.
     pub fn show_markdown_source(&mut self, source: bool) {
+        if source == self.shows_markdown_source() {
+            return;
+        }
         let Some(text) = self.markdown_source.take() else {
             return;
         };
