@@ -245,13 +245,13 @@ pub fn wrap_line(line: &Line, width: usize) -> Vec<Line<'static>> {
 /// Rows to show for `doc` in an area of `width` × `height` cells scrolled by
 /// `offset` display rows: wrapped content with a relative line number
 /// (the count to type before `j`) in front of each row.
-pub fn visible_rows(doc: &TextDoc, width: u16, height: u16, offset: u16) -> Vec<Line<'static>> {
+pub fn visible_rows(doc: &TextDoc, width: u16, height: u16, offset: usize) -> Vec<Line<'static>> {
     let height = height as usize;
     let number_width = height.to_string().len().max(1);
     let text_width = (width as usize).saturating_sub(number_width + 1);
     // Only the lines on screen are wrapped, so scrolling stays fast in
     // large files: skip whole lines by counting their rows first.
-    let mut skip = offset as usize;
+    let mut skip = offset;
     let mut first = doc.lines.len();
     for (i, line) in doc.lines.iter().enumerate() {
         let n = row_count(line, text_width);
@@ -318,7 +318,7 @@ pub fn row_count(line: &Line, width: usize) -> usize {
 
 /// Draw `doc` inside `block`, scrolled by `offset` display rows. The
 /// highlighted language is named at the bottom left of the border.
-pub fn draw(f: &mut Frame, area: Rect, block: Block, doc: &TextDoc, offset: u16) {
+pub fn draw(f: &mut Frame, area: Rect, block: Block, doc: &TextDoc, offset: usize) {
     let block = match &doc.renderer {
         Renderer::Syntax(name) => {
             block.title_bottom(Line::from(format!(" {name} ")).left_aligned())
@@ -580,6 +580,12 @@ mod tests {
         assert_eq!(texts(2), ["0 ij", "1 kl"]);
         assert_eq!(texts(50), ["0 ij", "1 kl"]);
         let short = TextDoc::plain("t".into(), "x\n");
+        let rows = visible_rows(&short, 6, 3, 5);
+        assert_eq!(rows.iter().map(text_of).collect::<Vec<_>>(), ["0 x"]);
+        // Offsets beyond u16 work (files with more than 65,535 rows).
+        let big = TextDoc::plain("t".into(), &"y\n".repeat(70_000));
+        let rows = visible_rows(&big, 10, 1, 69_999);
+        assert_eq!(rows.iter().map(text_of).collect::<Vec<_>>(), ["0 y"]);
         let rows = visible_rows(&short, 6, 3, 5);
         assert_eq!(rows.iter().map(text_of).collect::<Vec<_>>(), ["0 x"]);
     }

@@ -131,7 +131,7 @@ impl App {
                 }
                 Mode::Viewer { offset, doc, .. } => {
                     let total = doc.line_count();
-                    *offset = total.saturating_sub(1) as u16;
+                    *offset = total.saturating_sub(1);
                 }
                 _ => {}
             },
@@ -212,6 +212,11 @@ impl App {
             Command::ToggleGitFilter if filer => self.toggle_git_filter(),
             Command::ToggleHidden if filer => self.toggle_hidden(),
             Command::ToggleIgnored if filer => self.toggle_ignored(),
+            // The preview hides the other pane's cursor, so diffing against
+            // it would be a surprise.
+            Command::Diff if filer && self.text_preview.is_some() => {
+                self.notify_info("Close the preview first")
+            }
             Command::Diff if filer => self.show_diff(),
             Command::Refresh if filer => self.refresh_all(),
             Command::ToggleTextPreview if filer => self.toggle_text_preview(),
@@ -283,9 +288,9 @@ impl App {
             }
             Mode::Viewer { offset, .. } => {
                 *offset = if down {
-                    offset.saturating_add(n as u16)
+                    offset.saturating_add(n)
                 } else {
-                    offset.saturating_sub(n as u16)
+                    offset.saturating_sub(n)
                 };
             }
             Mode::Sort { selected } => {
@@ -851,6 +856,35 @@ mod tests {
     }
 
     #[test]
+    fn viewer_scrolls_past_65535_lines() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("big.txt"), "x\n".repeat(70_000)).unwrap();
+        let mut app = app_in(tmp.path());
+        let _ = app.apply(Command::Open);
+        let _ = app.apply(Command::GoBottom);
+        assert!(matches!(app.mode, Mode::Viewer { offset: 69_999, .. }));
+        let _ = app.apply(Command::MoveDown(10));
+        assert!(matches!(app.mode, Mode::Viewer { offset: 70_009, .. }));
+    }
+
+    #[test]
+    fn text_preview_shows_a_placeholder_for_images_and_videos() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("a.png"), "").unwrap();
+        fs::write(tmp.path().join("b.mp4"), "").unwrap();
+        let mut app = app_in(tmp.path());
+        let note = |app: &App| match app.text_preview.as_ref().map(|p| &p.content) {
+            Some(PreviewContent::Message(m)) => m.clone(),
+            _ => panic!("no placeholder"),
+        };
+        let _ = app.apply(Command::ToggleTextPreview);
+        assert_eq!(note(&app), "Image: press Enter to view");
+        let _ = app.apply(Command::MoveDown(1));
+        app.sync_text_preview();
+        assert_eq!(note(&app), "Video: press Enter to view");
+    }
+
+    #[test]
     fn viewer_highlights_known_languages() {
         let tmp = tempfile::tempdir().unwrap();
         fs::write(tmp.path().join("m.rs"), "fn main() {}\n").unwrap();
@@ -882,6 +916,12 @@ mod tests {
         assert_eq!(preview_title(&app), "c");
         let _ = app.apply(Command::ToggleTextPreview);
         assert!(app.text_preview.is_none());
+        // D needs the other pane's cursor, which the preview hides.
+        let _ = app.apply(Command::ToggleTextPreview);
+        let _ = app.apply(Command::Diff);
+        assert!(matches!(app.mode, Mode::Filer));
+        assert_eq!(message(&app), "Close the preview first");
+        let _ = app.apply(Command::ToggleTextPreview);
         // Only from the file list.
         let _ = app.apply(Command::Open);
         let _ = app.apply(Command::ToggleTextPreview);

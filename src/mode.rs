@@ -18,7 +18,7 @@ pub enum Mode {
     Viewer {
         /// Rendered text (title, lines); see [`crate::text_view`].
         doc: crate::text_view::TextDoc,
-        offset: u16,
+        offset: usize,
         /// Showing `git diff` output (`D`): lines are coloured and
         /// `q` / `Esc` close the viewer instead of quitting.
         diff: bool,

@@ -613,10 +613,16 @@ impl App {
         let mut error = None;
         if let Some(preview) = self.text_preview.as_mut() {
             preview.sync(path.as_deref(), |p| {
-                if media::is_image(p) || media::is_video(p) {
-                    return PreviewContent::Message(
-                        "Image / video: press Enter to preview".to_string(),
-                    );
+                // Placeholder until images / videos are shown here too (after #51).
+                let placeholder = if media::is_image(p) {
+                    "Image: press Enter to view"
+                } else if media::is_video(p) {
+                    "Video: press Enter to view"
+                } else {
+                    ""
+                };
+                if !placeholder.is_empty() {
+                    return PreviewContent::Message(placeholder.to_string());
                 }
                 text_view::load_preview(p).unwrap_or_else(|e| {
                     error = Some(e.clone());
