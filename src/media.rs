@@ -9,16 +9,16 @@ use std::{
 };
 
 use image::{DynamicImage, ImageReader};
-use ratatui_image::{picker::Picker, protocol::StatefulProtocol};
 
 /// Longest edge (in pixels) kept in memory for previews.
-const MAX_PREVIEW_EDGE: u32 = 2048;
+pub const MAX_PREVIEW_EDGE: u32 = 2048;
 
-/// A preview shown in the pane opposite to the active one.
-pub struct Preview {
+/// A decoded image / video preview, before it is encoded for the terminal.
+pub struct Loaded {
     pub title: String,
-    /// Encoded image ready for rendering (None if no image could be produced).
-    pub image: Option<StatefulProtocol>,
+    /// Decoded image, at most [`MAX_PREVIEW_EDGE`] on its longest edge
+    /// (None if no image could be produced).
+    pub image: Option<DynamicImage>,
     /// Text lines shown below the image (metadata or error messages).
     pub info: Vec<String>,
 }
@@ -46,6 +46,11 @@ pub fn is_image(path: &Path) -> bool {
                 | "avif"
         )
     )
+}
+
+/// An image or a video (by extension).
+pub fn is_media(path: &Path) -> bool {
+    is_image(path) || is_video(path)
 }
 
 pub fn is_video(path: &Path) -> bool {
@@ -143,7 +148,19 @@ fn decode_image(path: &Path) -> io::Result<DynamicImage> {
     }
 }
 
-pub fn load_image_preview(picker: &Picker, path: &Path) -> Preview {
+/// Decode an image or a video thumbnail; None if `path` is neither.
+/// Slow (image decoding, ffmpeg): call it off the UI thread.
+pub fn load(path: &Path) -> Option<Loaded> {
+    if is_image(path) {
+        Some(load_image(path))
+    } else if is_video(path) {
+        Some(load_video(path))
+    } else {
+        None
+    }
+}
+
+fn load_image(path: &Path) -> Loaded {
     let size = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     let format = ext_lower(path).unwrap_or_default().to_uppercase();
     match decode_image(path) {
@@ -155,13 +172,13 @@ pub fn load_image_preview(picker: &Picker, path: &Path) -> Preview {
                 format,
                 human_size(size)
             )];
-            Preview {
+            Loaded {
                 title: file_name(path),
-                image: Some(picker.new_resize_protocol(shrink(img))),
+                image: Some(shrink(img)),
                 info,
             }
         }
-        Err(e) => Preview {
+        Err(e) => Loaded {
             title: file_name(path),
             image: None,
             info: vec![format!("Cannot decode image: {e}")],
@@ -265,7 +282,7 @@ fn probe(path: &Path) -> io::Result<ProbeInfo> {
     Ok(info)
 }
 
-pub fn load_video_preview(picker: &Picker, path: &Path) -> Preview {
+fn load_video(path: &Path) -> Loaded {
     let size = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     let mut info = Vec::new();
     let probe = probe(path);
@@ -284,13 +301,14 @@ pub fn load_video_preview(picker: &Picker, path: &Path) -> Preview {
     // Grab a frame ~10% in (max 10s) to avoid black intro frames.
     let seek = duration.map(|d| (d * 0.1).min(10.0));
     let image = match ffmpeg_frame(path, seek) {
-        Ok(img) => Some(picker.new_resize_protocol(img)),
+        // ffmpeg only limits the width; shrink tall frames too.
+        Ok(img) => Some(shrink(img)),
         Err(e) => {
             info.push(format!("No thumbnail: {e}"));
             None
         }
     };
-    Preview {
+    Loaded {
         title: file_name(path),
         image,
         info,

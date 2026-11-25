@@ -9,8 +9,9 @@ use ratatui_image::picker::Picker;
 
 use crate::fs_utils::{sort_entries, SortBy};
 use crate::git::{self, FileStatus, GitStatus};
-use crate::media::{self, Preview};
+use crate::media;
 use crate::mode::{Mode, PaneType};
+use crate::preview::{self, Previewer};
 use crate::text_view::{self, PanePreview, PreviewContent, TextDoc};
 use crate::watch::{self, FsEvent};
 
@@ -274,6 +275,22 @@ pub fn fs_error_message(err: &io::Error, path: &Path) -> String {
     format!("{reason}: {name}")
 }
 
+/// For each listed entry, whether it is an image or a video (folders are not).
+pub fn media_flags(pane: &Pane) -> Vec<bool> {
+    pane.items
+        .iter()
+        .map(|e| {
+            let path = e.path();
+            let is_dir = match e.file_type() {
+                Ok(t) if t.is_symlink() => path.is_dir(),
+                Ok(t) => t.is_dir(),
+                Err(_) => false,
+            };
+            !is_dir && media::is_media(&path)
+        })
+        .collect()
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum MessageLevel {
     Info,
@@ -292,9 +309,8 @@ pub struct App {
     pub active: PaneType,
     pub mode: Mode,
     pub clipboard: Vec<PathBuf>,
-    /// Detects the terminal graphics protocol (Kitty / Sixel / iTerm2 / halfblocks).
-    pub picker: Picker,
-    pub preview: Option<Preview>,
+    /// Image / video preview (Mode::Preview) and its background loader.
+    pub preview: Previewer,
     /// Detected graphics protocol / font size (for the preview footer).
     pub graphics_info: String,
     /// Message shown in the status line (errors, result counts).
@@ -335,8 +351,7 @@ impl App {
             active: PaneType::Left,
             mode: Mode::Filer,
             clipboard: Vec::new(),
-            picker,
-            preview: None,
+            preview: Previewer::new(picker),
             graphics_info: String::new(),
             message: None,
             launch_dir,
@@ -583,16 +598,19 @@ impl App {
     }
 
     /// Show an image/video preview in the opposite pane. Returns false if
-    /// the path is not a previewable media file.
+    /// the path is not a previewable media file. The preview loads in the
+    /// background (see [`crate::preview`]).
     pub fn open_preview(&mut self, path: &std::path::Path) -> bool {
-        let preview = if media::is_image(path) {
-            media::load_image_preview(&self.picker, path)
-        } else if media::is_video(path) {
-            media::load_video_preview(&self.picker, path)
-        } else {
+        if !media::is_media(path) || path.is_dir() {
             return false;
-        };
-        self.preview = Some(preview);
+        }
+        let pane = self.current_pane();
+        let flags = media_flags(pane);
+        let prefetch = preview::prefetch_around(&flags, pane.selected, true)
+            .into_iter()
+            .map(|i| pane.items[i].path())
+            .collect();
+        self.preview.show(path.to_path_buf(), prefetch);
         self.mode = Mode::Preview;
         true
     }
@@ -636,7 +654,7 @@ impl App {
     }
 
     pub fn close_preview(&mut self) {
-        self.preview = None;
+        self.preview.close();
         self.mode = Mode::Filer;
     }
 
