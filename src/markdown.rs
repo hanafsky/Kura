@@ -32,7 +32,8 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::text_view::highlight_code;
 
 /// Width of a horizontal rule (`---`) in columns.
-pub const RULE_WIDTH: usize = 40;
+/// Fits the text preview of an 80-column terminal.
+pub const RULE_WIDTH: usize = 30;
 
 /// Rendered Markdown: display lines and, for each, the prefix of its
 /// wrapped continuation rows.
