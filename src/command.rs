@@ -895,23 +895,6 @@ mod tests {
     }
 
     #[test]
-    fn text_preview_shows_a_placeholder_for_images_and_videos() {
-        let tmp = tempfile::tempdir().unwrap();
-        fs::write(tmp.path().join("a.png"), "").unwrap();
-        fs::write(tmp.path().join("b.mp4"), "").unwrap();
-        let mut app = app_in(tmp.path());
-        let note = |app: &App| match app.text_preview.as_ref().map(|p| &p.content) {
-            Some(PreviewContent::Message(m)) => m.clone(),
-            _ => panic!("no placeholder"),
-        };
-        let _ = app.apply(Command::ToggleTextPreview);
-        assert_eq!(note(&app), "Image: press Enter to view");
-        let _ = app.apply(Command::MoveDown(1));
-        app.sync_text_preview();
-        assert_eq!(note(&app), "Video: press Enter to view");
-    }
-
-    #[test]
     fn viewer_highlights_known_languages() {
         let tmp = tempfile::tempdir().unwrap();
         fs::write(tmp.path().join("m.rs"), "fn main() {}\n").unwrap();
@@ -1664,6 +1647,78 @@ mod tests {
         assert!(matches!(app.mode, Mode::Filer));
         assert_eq!(app.preview.current(), None);
         assert_eq!(selected_name(&app), "e.jpg");
+    }
+
+    /// Move the cursor onto `name` with `P` on (syncing as each draw does).
+    fn cursor_to(app: &mut App, name: &str) {
+        while selected_name(app) != name {
+            let _ = app.apply(Command::MoveDown(1));
+            app.sync_text_preview();
+        }
+    }
+
+    fn pane_text_title(app: &App) -> Option<String> {
+        match app.text_preview.as_ref().map(|p| &p.content) {
+            Some(PreviewContent::Text(doc)) => Some(doc.title.clone()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn pane_preview_shows_images_and_videos_and_prefetches_around_the_cursor() {
+        let tmp = media_dir();
+        let mut app = app_in(tmp.path());
+        let _ = app.apply(Command::ToggleTextPreview);
+        cursor_to(&mut app, "c.mp4");
+        assert!(app.pane_preview_shows_media());
+        assert!(matches!(app.mode, Mode::Filer));
+        assert_eq!(wanted(&app), ["c.mp4", "e.jpg", "a.png"]);
+        cursor_to(&mut app, "e.jpg");
+        assert_eq!(shown(&app), "e.jpg");
+    }
+
+    #[test]
+    fn pane_preview_drops_the_image_when_the_cursor_leaves_it() {
+        let tmp = media_dir();
+        let mut app = app_in(tmp.path());
+        let _ = app.apply(Command::ToggleTextPreview);
+        // dir.png is a folder: not an image.
+        assert!(!app.pane_preview_shows_media());
+        cursor_to(&mut app, "a.png");
+        assert!(app.pane_preview_shows_media());
+        assert_eq!(shown(&app), "a.png");
+        cursor_to(&mut app, "b.txt");
+        assert!(!app.pane_preview_shows_media());
+        assert_eq!(app.preview.current(), None);
+        assert!(!app.preview.busy());
+        assert_eq!(pane_text_title(&app).as_deref(), Some("b.txt"));
+        cursor_to(&mut app, "c.mp4");
+        assert_eq!(shown(&app), "c.mp4");
+        cursor_to(&mut app, "d.md");
+        assert_eq!(app.preview.current(), None);
+        assert_eq!(pane_text_title(&app).as_deref(), Some("d.md"));
+    }
+
+    #[test]
+    fn gallery_from_the_pane_preview_returns_to_it() {
+        let tmp = media_dir();
+        let mut app = app_in(tmp.path());
+        let _ = app.apply(Command::ToggleTextPreview);
+        cursor_to(&mut app, "a.png");
+        let _ = app.apply(Command::Open);
+        assert!(matches!(app.mode, Mode::Preview));
+        let _ = app.apply(Command::MoveDown(1));
+        app.sync_text_preview();
+        assert_eq!(shown(&app), "c.mp4");
+        let _ = app.apply(Command::Back);
+        assert!(matches!(app.mode, Mode::Filer));
+        app.sync_text_preview();
+        // The pane preview goes on showing the entry under the cursor.
+        assert!(app.pane_preview_shows_media());
+        assert_eq!(shown(&app), "c.mp4");
+        let _ = app.apply(Command::ToggleTextPreview);
+        assert!(app.text_preview.is_none());
+        assert_eq!(app.preview.current(), None);
     }
 
     #[test]

@@ -88,7 +88,9 @@ pub fn ui(f: &mut Frame, app: &mut App) {
                 };
                 let pane = if left_active { &app.left } else { &app.right };
                 draw_pane(f, pane_area, pane, true, app.session_start);
-                if let Some(preview) = &app.text_preview {
+                if app.pane_preview_shows_media() {
+                    draw_media_preview(f, preview_area, app);
+                } else if let Some(preview) = &app.text_preview {
                     draw_text_preview(f, preview_area, &preview.content);
                 }
             }
@@ -334,6 +336,24 @@ fn draw_pane(f: &mut Frame, area: Rect, pane: &Pane, active: bool, session_start
     f.render_stateful_widget(list, area, &mut state);
 }
 
+/// Pane preview (`P`) of an image / video, loaded in the background by
+/// `app.preview` ("Loading…" until it is ready).
+fn draw_media_preview(f: &mut Frame, area: Rect, app: &mut App) {
+    let title = app.preview.title().unwrap_or_default();
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(Span::styled(
+            format!(" {title} "),
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .title_bottom(Line::from(" P: close preview ").right_aligned());
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    app.preview.draw_body(f, inner);
+}
+
 /// Text preview pane (`P`): the file's first lines, or why there are none.
 fn draw_text_preview(f: &mut Frame, area: Rect, content: &PreviewContent) {
     let title = match content {
@@ -464,5 +484,39 @@ mod tests {
             title(&pane).contains("[no ignored]"),
             pane.ignore_filter_active()
         );
+    }
+
+    /// The right half of the screen (the preview, with the left pane active).
+    fn screen(app: &mut App, w: u16, h: u16) -> String {
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| ui(f, app)).unwrap();
+        let buf = term.backend().buffer();
+        (0..h)
+            .map(|y| (w / 2..w).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn pane_preview_draws_images_then_text_without_leftovers() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("a.png"), "").unwrap();
+        std::fs::write(tmp.path().join("b.txt"), "hello text\n").unwrap();
+        let mut app = App::with_dir(
+            ratatui_image::picker::Picker::halfblocks(),
+            tmp.path().to_path_buf(),
+        )
+        .unwrap();
+        app.toggle_text_preview();
+        let s = screen(&mut app, 80, 12);
+        assert!(s.contains(" a.png "));
+        assert!(s.contains("Loading…") || s.contains("Cannot decode"));
+        assert!(s.contains("P: close preview"));
+        app.current_pane_mut().selected = 1;
+        let s = screen(&mut app, 80, 12);
+        assert!(s.contains(" b.txt "));
+        assert!(s.contains("hello text"));
+        assert!(!s.contains("Loading…"));
+        assert!(!s.contains(" a.png "));
     }
 }

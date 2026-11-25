@@ -26,7 +26,9 @@
 //! 3. [`Previewer::draw`] draws it with a titled border, or
 //!    [`Previewer::draw_body`] draws only the image and info lines into an
 //!    area. The size drawn into is what the workers encode for.
-//! 4. [`Previewer::close`] when it is no longer shown.
+//! 4. [`Previewer::close`] when it is no longer shown, or
+//!    [`Previewer::hide`] to stop showing but keep the cache (the `P` pane
+//!    preview, while the cursor is on a non-media entry).
 
 use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -397,6 +399,14 @@ impl Previewer {
         self.queue.set_loads(&missing);
     }
 
+    /// Stop showing and drop pending work, but keep the cache (so coming
+    /// back to a loaded entry is instant). Loads already running finish and
+    /// are dropped.
+    pub fn hide(&mut self) {
+        self.wanted.clear();
+        self.queue.clear();
+    }
+
     /// Stop showing and drop the cache and pending work.
     pub fn close(&mut self) {
         self.wanted.clear();
@@ -467,18 +477,22 @@ impl Previewer {
         }
     }
 
-    /// Draw the shown preview into `area`.
-    pub fn draw(&mut self, f: &mut Frame, area: Rect) {
-        let Some(path) = self.current().map(Path::to_path_buf) else {
-            return;
-        };
-        let entry = self.entries.iter_mut().find(|e| e.path == path);
-        let title = match &entry {
+    /// Title of the shown preview (the file name until it is loaded).
+    pub fn title(&self) -> Option<String> {
+        let path = self.current()?;
+        Some(match self.entries.iter().find(|e| e.path == path) {
             Some(e) => e.title.clone(),
             None => path
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default(),
+        })
+    }
+
+    /// Draw the shown preview into `area`.
+    pub fn draw(&mut self, f: &mut Frame, area: Rect) {
+        let Some(title) = self.title() else {
+            return;
         };
         let block = Block::default().borders(Borders::ALL).title(Span::styled(
             format!(" {title} "),
@@ -696,6 +710,25 @@ mod tests {
         p.close();
         assert_eq!(p.current(), None);
         assert!(p.entries.is_empty());
+    }
+
+    #[test]
+    fn hide_keeps_the_cache_and_drops_pending_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = write_png(dir.path(), "a.png");
+        let mut p = Previewer::new(Picker::halfblocks());
+        p.show(a.clone(), vec![]);
+        wait_loaded(&mut p, &a);
+        assert_eq!(p.title().as_deref(), Some("a.png"));
+        p.show(dir.path().join("missing.png"), vec![]);
+        p.hide();
+        assert_eq!(p.current(), None);
+        assert_eq!(p.title(), None);
+        assert!(!p.busy());
+        assert!(p.queue.lock().loads.is_empty());
+        // Showing it again needs no new load.
+        p.show(a.clone(), vec![]);
+        assert!(p.queue.lock().loads.is_empty());
     }
 
     #[test]
