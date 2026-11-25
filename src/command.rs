@@ -17,6 +17,7 @@ use crate::fs_utils::{apply_sort, find_match, SearchFrom, SortBy, DIRS_FIRST_ROW
 use crate::media::open_external;
 use crate::mode::{Mode, PaneType};
 use crate::paste::ConflictChoice;
+use crate::text_view::TextDoc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {
@@ -82,6 +83,9 @@ pub enum Command {
     /// Show the diff between the files under the cursors of both panes
     /// (or of the active file against HEAD).
     Diff,
+    /// Show or hide the text preview of the entry under the cursor in the
+    /// opposite pane.
+    ToggleTextPreview,
     /// Re-read both panes from disk (also works with `KURA_WATCH=off`).
     Refresh,
     /// Sort by the highlighted option.
@@ -125,11 +129,9 @@ impl App {
                     let pane = self.current_pane_mut();
                     pane.selected = pane.items.len().saturating_sub(1);
                 }
-                Mode::Viewer {
-                    offset, content, ..
-                } => {
-                    let total = content.lines().count();
-                    *offset = total.saturating_sub(1) as u16;
+                Mode::Viewer { offset, doc, .. } => {
+                    let total = doc.line_count();
+                    *offset = total.saturating_sub(1);
                 }
                 _ => {}
             },
@@ -210,8 +212,14 @@ impl App {
             Command::ToggleGitFilter if filer => self.toggle_git_filter(),
             Command::ToggleHidden if filer => self.toggle_hidden(),
             Command::ToggleIgnored if filer => self.toggle_ignored(),
+            // The preview hides the other pane's cursor, so diffing against
+            // it would be a surprise.
+            Command::Diff if filer && self.text_preview.is_some() => {
+                self.notify_info("Close the preview first")
+            }
             Command::Diff if filer => self.show_diff(),
             Command::Refresh if filer => self.refresh_all(),
+            Command::ToggleTextPreview if filer => self.toggle_text_preview(),
             Command::SortConfirm => {
                 if let Mode::Sort { selected } = self.mode {
                     self.mode = Mode::Filer;
@@ -280,9 +288,9 @@ impl App {
             }
             Mode::Viewer { offset, .. } => {
                 *offset = if down {
-                    offset.saturating_add(n as u16)
+                    offset.saturating_add(n)
                 } else {
-                    offset.saturating_sub(n as u16)
+                    offset.saturating_sub(n)
                 };
             }
             Mode::Sort { selected } => {
@@ -324,8 +332,7 @@ impl App {
         match diff::run(&plan) {
             diff::Outcome::Diff(content) => {
                 self.mode = Mode::Viewer {
-                    content,
-                    title: diff::title(&plan),
+                    doc: TextDoc::diff(diff::title(&plan), &content),
                     offset: 0,
                     diff: true,
                 };
@@ -399,6 +406,7 @@ fn diff_target(pane: &Pane) -> diff::Target {
 mod tests {
     use super::*;
     use crate::app::MessageLevel;
+    use crate::text_view::{PreviewContent, Renderer};
     use ratatui_image::picker::Picker;
     use std::fs;
     use std::path::Path;
@@ -845,6 +853,79 @@ mod tests {
         assert!(matches!(app.mode, Mode::Viewer { offset: 0, .. }));
         let _ = app.apply(Command::Back);
         assert!(matches!(app.mode, Mode::Filer));
+    }
+
+    #[test]
+    fn viewer_scrolls_past_65535_lines() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("big.txt"), "x\n".repeat(70_000)).unwrap();
+        let mut app = app_in(tmp.path());
+        let _ = app.apply(Command::Open);
+        let _ = app.apply(Command::GoBottom);
+        assert!(matches!(app.mode, Mode::Viewer { offset: 69_999, .. }));
+        let _ = app.apply(Command::MoveDown(10));
+        assert!(matches!(app.mode, Mode::Viewer { offset: 70_009, .. }));
+    }
+
+    #[test]
+    fn text_preview_shows_a_placeholder_for_images_and_videos() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("a.png"), "").unwrap();
+        fs::write(tmp.path().join("b.mp4"), "").unwrap();
+        let mut app = app_in(tmp.path());
+        let note = |app: &App| match app.text_preview.as_ref().map(|p| &p.content) {
+            Some(PreviewContent::Message(m)) => m.clone(),
+            _ => panic!("no placeholder"),
+        };
+        let _ = app.apply(Command::ToggleTextPreview);
+        assert_eq!(note(&app), "Image: press Enter to view");
+        let _ = app.apply(Command::MoveDown(1));
+        app.sync_text_preview();
+        assert_eq!(note(&app), "Video: press Enter to view");
+    }
+
+    #[test]
+    fn viewer_highlights_known_languages() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("m.rs"), "fn main() {}\n").unwrap();
+        let mut app = app_in(tmp.path());
+        let _ = app.apply(Command::Open);
+        match &app.mode {
+            Mode::Viewer { doc, diff, .. } => {
+                assert!(!diff);
+                assert_eq!(doc.title, "m.rs");
+                assert_eq!(doc.renderer, Renderer::Syntax("Rust".into()));
+            }
+            _ => panic!("not in the viewer"),
+        }
+    }
+
+    #[test]
+    fn text_preview_toggles_and_follows_the_cursor() {
+        let tmp = abcd();
+        let mut app = app_in(tmp.path());
+        let preview_title = |app: &App| match app.text_preview.as_ref().map(|p| &p.content) {
+            Some(PreviewContent::Text(doc)) => doc.title.clone(),
+            _ => panic!("no text preview"),
+        };
+        let _ = app.apply(Command::ToggleTextPreview);
+        assert!(matches!(app.mode, Mode::Filer));
+        assert_eq!(preview_title(&app), "a");
+        let _ = app.apply(Command::MoveDown(2));
+        app.sync_text_preview(); // done before every draw
+        assert_eq!(preview_title(&app), "c");
+        let _ = app.apply(Command::ToggleTextPreview);
+        assert!(app.text_preview.is_none());
+        // D needs the other pane's cursor, which the preview hides.
+        let _ = app.apply(Command::ToggleTextPreview);
+        let _ = app.apply(Command::Diff);
+        assert!(matches!(app.mode, Mode::Filer));
+        assert_eq!(message(&app), "Close the preview first");
+        let _ = app.apply(Command::ToggleTextPreview);
+        // Only from the file list.
+        let _ = app.apply(Command::Open);
+        let _ = app.apply(Command::ToggleTextPreview);
+        assert!(app.text_preview.is_none());
     }
 
     #[test]
@@ -1360,13 +1441,12 @@ mod tests {
         assert_eq!(app.message.as_ref().unwrap().text, "Not a git repository");
     }
 
-    fn diff_content(app: &App) -> &str {
+    /// Text of the diff viewer, one `\n`-terminated line per row.
+    fn diff_content(app: &App) -> String {
         match &app.mode {
             Mode::Viewer {
-                content,
-                diff: true,
-                ..
-            } => content,
+                doc, diff: true, ..
+            } => doc.lines.iter().map(|l| format!("{l}\n")).collect(),
             _ => panic!("not in the diff viewer"),
         }
     }

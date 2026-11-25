@@ -11,6 +11,7 @@ use crate::fs_utils::{sort_entries, SortBy};
 use crate::git::{self, FileStatus, GitStatus};
 use crate::media::{self, Preview};
 use crate::mode::{Mode, PaneType};
+use crate::text_view::{self, PanePreview, PreviewContent, TextDoc};
 use crate::watch::{self, FsEvent};
 
 pub struct Pane {
@@ -308,6 +309,9 @@ pub struct App {
     pub pending_edit: Option<PathBuf>,
     /// When kura started; files changed after it are highlighted.
     pub session_start: SystemTime,
+    /// Text preview of the entry under the cursor in the opposite pane
+    /// (`P`); `None` while it is off.
+    pub text_preview: Option<PanePreview>,
 }
 
 impl App {
@@ -339,6 +343,7 @@ impl App {
             last_search: None,
             pending_edit: None,
             session_start: SystemTime::now(),
+            text_preview: None,
         })
     }
 
@@ -592,6 +597,44 @@ impl App {
         true
     }
 
+    /// `P`: turn the text preview in the opposite pane on or off.
+    pub fn toggle_text_preview(&mut self) {
+        self.text_preview = match self.text_preview {
+            Some(_) => None,
+            None => Some(PanePreview::new()),
+        };
+        self.sync_text_preview();
+    }
+
+    /// Load the entry under the cursor into the text preview, if it is on
+    /// and the entry changed. Called before every draw.
+    pub fn sync_text_preview(&mut self) {
+        let path = self.selected_path();
+        let mut error = None;
+        if let Some(preview) = self.text_preview.as_mut() {
+            preview.sync(path.as_deref(), |p| {
+                // Placeholder until images / videos are shown here too (after #51).
+                let placeholder = if media::is_image(p) {
+                    "Image: press Enter to view"
+                } else if media::is_video(p) {
+                    "Video: press Enter to view"
+                } else {
+                    ""
+                };
+                if !placeholder.is_empty() {
+                    return PreviewContent::Message(placeholder.to_string());
+                }
+                text_view::load_preview(p).unwrap_or_else(|e| {
+                    error = Some(e.clone());
+                    PreviewContent::Message(e)
+                })
+            });
+        }
+        if let Some(e) = error {
+            self.notify_error(e);
+        }
+    }
+
     pub fn close_preview(&mut self) {
         self.preview = None;
         self.mode = Mode::Filer;
@@ -615,8 +658,7 @@ impl App {
                     .map(|os_str| os_str.to_string_lossy().into_owned())
                     .unwrap_or_default();
                 self.mode = Mode::Viewer {
-                    content,
-                    title,
+                    doc: TextDoc::for_file(title, &path, &content),
                     offset: 0,
                     diff: false,
                 };

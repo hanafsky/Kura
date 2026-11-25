@@ -15,6 +15,7 @@ mod media;
 mod mode;
 mod paste;
 mod terminal;
+mod text_view;
 mod ui;
 mod watch;
 

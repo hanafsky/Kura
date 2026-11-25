@@ -33,6 +33,7 @@ const FILER_KEYS: Bindings = &[
     (KeyCode::Char('V'), Command::VisualStart),
     (KeyCode::Char('y'), Command::Yank),
     (KeyCode::Char('p'), Command::Paste),
+    (KeyCode::Char('P'), Command::ToggleTextPreview),
     (KeyCode::Char('Y'), Command::CopyAtPaths),
     (KeyCode::Char('x'), Command::Delete(DeleteKind::Normal)),
     (KeyCode::Char('X'), Command::Delete(DeleteKind::Permanent)),
@@ -374,6 +375,7 @@ mod tests {
     use super::*;
     use crate::delete_confirm::DeleteKind;
     use crate::paste::{ConflictChoice, Resolution};
+    use crate::text_view::TextDoc;
     use std::path::PathBuf;
 
     fn ch(c: char) -> KeyCode {
@@ -408,8 +410,7 @@ mod tests {
 
     fn viewer() -> Mode {
         Mode::Viewer {
-            content: String::new(),
-            title: String::new(),
+            doc: TextDoc::plain(String::new(), ""),
             offset: 0,
             diff: false,
         }
@@ -417,8 +418,7 @@ mod tests {
 
     fn diff_viewer() -> Mode {
         Mode::Viewer {
-            content: String::new(),
-            title: String::new(),
+            doc: TextDoc::plain(String::new(), ""),
             offset: 0,
             diff: true,
         }
@@ -436,6 +436,9 @@ mod tests {
         );
         assert_eq!(run(&f, &[ch('x')]), [Command::Delete(DeleteKind::Normal)]);
         assert_eq!(run(&f, &[ch('p')]), [Command::Paste]);
+        assert_eq!(run(&f, &[ch('P')]), [Command::ToggleTextPreview]);
+        assert!(run(&viewer(), &[ch('P')]).is_empty());
+        assert!(run(&Mode::Preview, &[ch('P')]).is_empty());
         assert_eq!(run(&f, &[ch('Y')]), [Command::CopyAtPaths]);
         assert_eq!(run(&f, &[ch('M')]), [Command::ToggleGitFilter]);
         assert_eq!(run(&f, &[ch('D')]), [Command::Diff]);
