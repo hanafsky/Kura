@@ -345,6 +345,9 @@ pub struct Previewer {
     entries: Vec<Entry>,
     /// The entry to show, then the ones to prefetch.
     wanted: Vec<PathBuf>,
+    /// Nothing is shown, but `wanted` keeps loading into the cache
+    /// ([`Previewer::hide`]).
+    hidden: bool,
     next_token: u64,
 }
 
@@ -361,12 +364,16 @@ impl Previewer {
             results,
             entries: Vec::new(),
             wanted: Vec::new(),
+            hidden: false,
             next_token: 0,
         }
     }
 
     /// Path being shown, if any.
     pub fn current(&self) -> Option<&Path> {
+        if self.hidden {
+            return None;
+        }
         self.wanted.first().map(PathBuf::as_path)
     }
 
@@ -379,6 +386,7 @@ impl Previewer {
     /// Show `path` (loading it in the background if needed) and prefetch
     /// `prefetch`. Loads requested earlier that have not started are dropped.
     pub fn show(&mut self, path: PathBuf, prefetch: Vec<PathBuf>) {
+        self.hidden = false;
         self.wanted = std::iter::once(path).chain(prefetch).collect();
         // Forget cached entries whose file changed since.
         self.entries
@@ -399,16 +407,16 @@ impl Previewer {
         self.queue.set_loads(&missing);
     }
 
-    /// Stop showing and drop pending work, but keep the cache (so coming
-    /// back to a loaded entry is instant). Loads already running finish and
-    /// are dropped.
+    /// Stop showing, but keep the cache and let the requested loads
+    /// (prefetches included) finish into it, so coming back to them is
+    /// instant. The next [`Previewer::show`] replaces what is still pending.
     pub fn hide(&mut self) {
-        self.wanted.clear();
-        self.queue.clear();
+        self.hidden = true;
     }
 
     /// Stop showing and drop the cache and pending work.
     pub fn close(&mut self) {
+        self.hidden = false;
         self.wanted.clear();
         self.entries.clear();
         self.queue.clear();
@@ -417,7 +425,7 @@ impl Previewer {
     /// True while the shown preview waits for a worker (the event loop then
     /// checks for results more often).
     pub fn busy(&self) -> bool {
-        !self.wanted.is_empty() && !self.queue.idle()
+        self.current().is_some() && !self.queue.idle()
     }
 
     /// Take finished work from the workers; true if anything arrived.
@@ -713,22 +721,41 @@ mod tests {
     }
 
     #[test]
-    fn hide_keeps_the_cache_and_drops_pending_work() {
+    fn hidden_loads_finish_into_the_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = write_png(dir.path(), "a.png");
+        let b = write_png(dir.path(), "b.png");
+        let mut p = Previewer::new(Picker::halfblocks());
+        p.show(a.clone(), vec![b.clone()]);
+        p.hide();
+        assert_eq!(p.current(), None);
+        assert_eq!(p.title(), None);
+        assert!(!p.busy());
+        wait_loaded(&mut p, &a);
+        wait_loaded(&mut p, &b);
+        // Showing them again needs no new load.
+        p.show(b.clone(), vec![a.clone()]);
+        assert_eq!(p.title().as_deref(), Some("b.png"));
+        assert!(p.queue.lock().loads.is_empty());
+    }
+
+    #[test]
+    fn a_changed_file_is_loaded_again() {
         let dir = tempfile::tempdir().unwrap();
         let a = write_png(dir.path(), "a.png");
         let mut p = Previewer::new(Picker::halfblocks());
         p.show(a.clone(), vec![]);
         wait_loaded(&mut p, &a);
-        assert_eq!(p.title().as_deref(), Some("a.png"));
-        p.show(dir.path().join("missing.png"), vec![]);
-        p.hide();
-        assert_eq!(p.current(), None);
-        assert_eq!(p.title(), None);
-        assert!(!p.busy());
-        assert!(p.queue.lock().loads.is_empty());
-        // Showing it again needs no new load.
+        let later = SystemTime::now() + std::time::Duration::from_secs(5);
+        std::fs::File::options()
+            .write(true)
+            .open(&a)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
         p.show(a.clone(), vec![]);
-        assert!(p.queue.lock().loads.is_empty());
+        assert!(p.entries.iter().all(|e| e.path != a));
+        assert!(p.busy());
     }
 
     #[test]

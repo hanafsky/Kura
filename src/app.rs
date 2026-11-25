@@ -609,14 +609,11 @@ impl App {
     }
 
     /// Show `path` in [`App::preview`] and prefetch the media entries
-    /// around the cursor, unless it is already shown. False if `path` is
-    /// not an image / video.
+    /// around the cursor. False if `path` is not an image / video. Cheap to
+    /// repeat: cached entries are reused unless their file changed.
     fn show_media(&mut self, path: &std::path::Path) -> bool {
         if !media::is_media(path) || path.is_dir() {
             return false;
-        }
-        if self.preview.current() == Some(path) {
-            return true;
         }
         let pane = self.current_pane();
         let flags = media_flags(pane);
