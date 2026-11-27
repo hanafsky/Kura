@@ -8,7 +8,8 @@
 //!
 //! Language detection ([`detect_syntax`]), syntect → span conversion
 //! ([`to_span`]), wrapping ([`wrap_line`], [`wrap_hanging`]) and row
-//! selection ([`visible_rows`]) are pure functions.
+//! selection ([`visible_rows`]) and the scroll limit ([`max_offset`],
+//! [`clamp_offset`], counted in wrapped display rows) are pure functions.
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -173,6 +174,7 @@ impl TextDoc {
     }
 
     /// Number of source lines.
+    #[cfg(test)]
     pub fn line_count(&self) -> usize {
         self.lines.len()
     }
@@ -469,14 +471,53 @@ fn split_rows(
     rows
 }
 
+/// Columns left for text in an area of `width` × `height` cells, after
+/// the relative line numbers (as wide as the largest one, `height - 1`)
+/// and a space.
+fn text_width(width: u16, height: u16) -> usize {
+    let number_width = (height as usize).to_string().len().max(1);
+    (width as usize).saturating_sub(number_width + 1)
+}
+
+/// Largest scroll offset for `doc` in an area of `width` × `height` cells:
+/// the one that puts the last wrapped row on the bottom row of the area
+/// (0 when everything fits). Offsets count display rows, not lines.
+pub fn max_offset(doc: &TextDoc, width: u16, height: u16) -> usize {
+    let text_width = text_width(width, height);
+    let total: usize = doc
+        .lines
+        .iter()
+        .enumerate()
+        .map(|(i, line)| row_count_hanging(line, text_width, doc.hangs.get(i)))
+        .sum();
+    total.saturating_sub(height as usize)
+}
+
+/// `offset` limited to [`max_offset`], so that scrolling never goes past
+/// the last page. Only counts the rows up to the screen when the offset is
+/// in range, so scrolling stays fast near the top of large files.
+pub fn clamp_offset(doc: &TextDoc, width: u16, height: u16, offset: usize) -> usize {
+    let text_width = text_width(width, height);
+    let needed = offset.saturating_add(height as usize);
+    let mut total = 0usize;
+    for (i, line) in doc.lines.iter().enumerate() {
+        total += row_count_hanging(line, text_width, doc.hangs.get(i));
+        if total >= needed {
+            return offset;
+        }
+    }
+    offset.min(total.saturating_sub(height as usize))
+}
+
 /// Rows to show for `doc` in an area of `width` × `height` cells scrolled by
 /// `offset` display rows: wrapped content with a relative line number
-/// (the count to type before `j`) in front of each row.
+/// (the count to type before `j`) in front of each row. An offset past the
+/// end shows the last full page (see [`clamp_offset`]).
 pub fn visible_rows(doc: &TextDoc, width: u16, height: u16, offset: usize) -> Vec<Line<'static>> {
+    let offset = clamp_offset(doc, width, height, offset);
     let height = height as usize;
     let number_width = height.to_string().len().max(1);
-    let text_width = (width as usize).saturating_sub(number_width + 1);
-    let wrap = |i: usize| wrap_hanging(&doc.lines[i], text_width, doc.hangs.get(i));
+    let text_width = text_width(width, height as u16);
     // Only the lines on screen are wrapped, so scrolling stays fast in
     // large files: skip whole lines by counting their rows first.
     let mut skip = offset;
@@ -491,26 +532,14 @@ pub fn visible_rows(doc: &TextDoc, width: u16, height: u16, offset: usize) -> Ve
     }
     let mut rows = Vec::new();
     for i in first..doc.lines.len() {
-        rows.extend(wrap(i));
+        rows.extend(wrap_hanging(&doc.lines[i], text_width, doc.hangs.get(i)));
         if rows.len() >= skip + height {
             break;
         }
     }
-    let mut rows: Vec<Line> = rows.into_iter().skip(skip).take(height).collect();
-    if rows.len() < height {
-        // Scrolled past the end: show the last full page.
-        let mut tail: Vec<Line> = Vec::new();
-        for i in (0..doc.lines.len()).rev() {
-            let mut wrapped = wrap(i);
-            wrapped.append(&mut tail);
-            tail = wrapped;
-            if tail.len() >= height {
-                break;
-            }
-        }
-        rows = tail.split_off(tail.len().saturating_sub(height));
-    }
     rows.into_iter()
+        .skip(skip)
+        .take(height)
         .enumerate()
         .map(|(i, row)| {
             let mut spans = vec![Span::styled(
@@ -555,14 +584,24 @@ pub fn row_count_hanging(line: &Line, width: usize, hang: Option<&Line>) -> usiz
 
 /// Draw `doc` inside `block`, scrolled by `offset` display rows. The
 /// highlighted language is named at the bottom left of the border.
-pub fn draw(f: &mut Frame, area: Rect, block: Block, doc: &TextDoc, offset: usize) {
+/// Returns the size of the text area and the offset limited to it
+/// ([`clamp_offset`]), for the caller to keep.
+pub fn draw(
+    f: &mut Frame,
+    area: Rect,
+    block: Block,
+    doc: &TextDoc,
+    offset: usize,
+) -> ((u16, u16), usize) {
     let block = match bottom_label(doc) {
         Some(label) => block.title_bottom(Line::from(label).left_aligned()),
         None => block,
     };
     let inner = block.inner(area);
+    let offset = clamp_offset(doc, inner.width, inner.height, offset);
     let rows = visible_rows(doc, inner.width, inner.height, offset);
     f.render_widget(Paragraph::new(rows).block(block), area);
+    ((inner.width, inner.height), offset)
 }
 
 /// Label at the bottom left of the border: the highlighted language, or
@@ -944,6 +983,102 @@ mod tests {
         assert_eq!(rows.iter().map(text_of).collect::<Vec<_>>(), ["0 y"]);
         let rows = visible_rows(&short, 6, 3, 5);
         assert_eq!(rows.iter().map(text_of).collect::<Vec<_>>(), ["0 x"]);
+    }
+
+    /// All display rows of `doc` at `width` × `height`, without numbers.
+    fn all_rows(doc: &TextDoc, width: u16, height: u16) -> Vec<String> {
+        let tw = text_width(width, height);
+        (0..doc.lines.len())
+            .flat_map(|i| wrap_hanging(&doc.lines[i], tw, doc.hangs.get(i)))
+            .map(|l| text_of(&l))
+            .collect()
+    }
+
+    /// At [`max_offset`] the last wrapped row is on the bottom row and the
+    /// screen is full; larger offsets are clamped to it.
+    fn assert_bottom(doc: &TextDoc, width: u16, height: u16) {
+        let all = all_rows(doc, width, height);
+        let max = max_offset(doc, width, height);
+        assert_eq!(max, all.len().saturating_sub(height as usize));
+        assert!(max > 0, "test document should not fit on one screen");
+        let shown: Vec<String> = visible_rows(doc, width, height, max)
+            .iter()
+            .map(|l| {
+                let t = text_of(l);
+                t.split_once(' ')
+                    .map_or(t.clone(), |(_, rest)| rest.to_string())
+            })
+            .collect();
+        assert_eq!(shown, all[max..]);
+        for off in [max, max + 1, usize::MAX] {
+            assert_eq!(clamp_offset(doc, width, height, off), max);
+        }
+        assert_eq!(clamp_offset(doc, width, height, max - 1), max - 1);
+    }
+
+    #[test]
+    fn row_count_uses_display_width_of_japanese() {
+        let line = Line::raw("あいうえおかきくけこ");
+        // 20 columns: 3 characters (6 columns) per row of 6 columns, and
+        // only 2 per row of 5 (a wide character never straddles rows).
+        assert_eq!(row_count(&line, 6), 4);
+        assert_eq!(row_count(&line, 5), 5);
+        assert_eq!(row_count(&line, 20), 1);
+        assert_eq!(row_count(&line, 6), wrap_line(&line, 6).len());
+        assert_eq!(row_count(&line, 5), wrap_line(&line, 5).len());
+        assert_eq!(row_count(&Line::raw("aあb"), 3), 2);
+    }
+
+    #[test]
+    fn max_offset_counts_wrapped_rows() {
+        // Width 8 leaves 6 columns: the first line takes 4 rows.
+        let doc = TextDoc::plain("t".into(), "あいうえおかきくけこ\nab\n");
+        assert_eq!(max_offset(&doc, 8, 2), 3);
+        assert_eq!(
+            visible_rows(&doc, 8, 2, usize::MAX)
+                .iter()
+                .map(text_of)
+                .collect::<Vec<_>>(),
+            ["0 こ", "1 ab"]
+        );
+        // Everything fits: no scrolling.
+        assert_eq!(max_offset(&doc, 8, 10), 0);
+        assert_eq!(clamp_offset(&doc, 8, 10, 5), 0);
+        // A narrower screen has more rows to scroll.
+        assert_eq!(max_offset(&doc, 7, 2), 4);
+        let empty = TextDoc::plain("t".into(), "");
+        assert_eq!(max_offset(&empty, 8, 2), 0);
+    }
+
+    #[test]
+    fn bottom_shows_last_wrapped_row_for_every_renderer() {
+        let long = "word ".repeat(30);
+        let ja = "日本語の文章を折り返して表示します。".repeat(4);
+        let plain = TextDoc::plain("t".into(), &format!("{long}\n{ja}\nend\n"));
+        assert_eq!(plain.renderer, Renderer::Plain);
+        assert_bottom(&plain, 20, 5);
+        let rust = TextDoc::for_file(
+            "a.rs".into(),
+            Path::new("a.rs"),
+            &format!("// {ja}\nfn main() {{ let s = \"{long}\"; }}\n"),
+        );
+        assert_eq!(rust.renderer, Renderer::Syntax("Rust".into()));
+        assert_bottom(&rust, 20, 5);
+        let diff = TextDoc::diff(
+            "d".into(),
+            &format!("--- a/x\n+++ b/x\n@@ -1 +1 @@\n-{long}\n+{ja}\n"),
+        );
+        assert_eq!(diff.renderer, Renderer::Diff);
+        assert_bottom(&diff, 20, 5);
+        // One paragraph is one line of the document but many rows.
+        let md = TextDoc::markdown(
+            "m".into(),
+            &format!("# Title\n\n{long}\n\n- {ja}\n\n> {long}\n"),
+        );
+        assert_eq!(md.renderer, Renderer::Markdown);
+        assert!(md.line_count() < all_rows(&md, 20, 5).len());
+        assert_bottom(&md, 20, 5);
+        assert_bottom(&md, 33, 4);
     }
 
     #[test]

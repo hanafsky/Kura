@@ -328,6 +328,10 @@ pub struct App {
     /// Text preview of the entry under the cursor in the opposite pane
     /// (`P`); `None` while it is off.
     pub text_preview: Option<PanePreview>,
+    /// Width × height of the text viewer's text area at the last draw, so
+    /// that scrolling can stop at the last wrapped row (`G`, `j`). `None`
+    /// before the viewer was first drawn.
+    pub viewer_size: Option<(u16, u16)>,
 }
 
 impl App {
@@ -359,6 +363,7 @@ impl App {
             pending_edit: None,
             session_start: SystemTime::now(),
             text_preview: None,
+            viewer_size: None,
         })
     }
 
