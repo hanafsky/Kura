@@ -30,6 +30,14 @@ pub enum Command {
     MoveDown(usize),
     /// Move up `n` rows; see [`Command::MoveDown`].
     MoveUp(usize),
+    /// Scroll the text viewer down `n` screens (`PageDown`, `Ctrl-f`).
+    PageDown(usize),
+    /// Scroll the text viewer up `n` screens (`PageUp`, `Ctrl-b`).
+    PageUp(usize),
+    /// Scroll the text viewer down `n` half screens (`Ctrl-d`).
+    HalfPageDown(usize),
+    /// Scroll the text viewer up `n` half screens (`Ctrl-u`).
+    HalfPageUp(usize),
     /// Jump to the first entry (file list) or the top (text viewer).
     GoTop,
     /// Jump to the last entry (file list) or the bottom (text viewer).
@@ -109,6 +117,10 @@ impl Command {
         match self {
             Command::MoveDown(n) => Command::MoveDown(n.saturating_mul(count)),
             Command::MoveUp(n) => Command::MoveUp(n.saturating_mul(count)),
+            Command::PageDown(n) => Command::PageDown(n.saturating_mul(count)),
+            Command::PageUp(n) => Command::PageUp(n.saturating_mul(count)),
+            Command::HalfPageDown(n) => Command::HalfPageDown(n.saturating_mul(count)),
+            Command::HalfPageUp(n) => Command::HalfPageUp(n.saturating_mul(count)),
             other => other,
         }
     }
@@ -124,9 +136,16 @@ impl App {
             Command::Quit => return ControlFlow::Break(()),
             Command::MoveDown(n) => self.move_by(n, true),
             Command::MoveUp(n) => self.move_by(n, false),
+            Command::PageDown(n) => self.scroll_pages(n, false, true),
+            Command::PageUp(n) => self.scroll_pages(n, false, false),
+            Command::HalfPageDown(n) => self.scroll_pages(n, true, true),
+            Command::HalfPageUp(n) => self.scroll_pages(n, true, false),
             Command::GoTop => match &mut self.mode {
                 Mode::Filer => self.current_pane_mut().selected = 0,
-                Mode::Viewer { offset, .. } => *offset = 0,
+                Mode::Viewer { offset, at_end, .. } => {
+                    *offset = 0;
+                    *at_end = false;
+                }
                 _ => {}
             },
             Command::GoBottom => match &mut self.mode {
@@ -134,7 +153,13 @@ impl App {
                     let pane = self.current_pane_mut();
                     pane.selected = pane.items.len().saturating_sub(1);
                 }
-                Mode::Viewer { offset, doc, .. } => {
+                Mode::Viewer {
+                    offset,
+                    doc,
+                    at_end,
+                    ..
+                } => {
+                    *at_end = true;
                     // The last wrapped row at the bottom of the screen; the
                     // draw limits the offset when the size is not known yet.
                     *offset = match self.viewer_size {
@@ -296,7 +321,12 @@ impl App {
                 }
                 self.update_visual_marks();
             }
-            Mode::Viewer { offset, doc, .. } => {
+            Mode::Viewer {
+                offset,
+                doc,
+                at_end,
+                ..
+            } => {
                 *offset = if down {
                     offset.saturating_add(n)
                 } else {
@@ -305,6 +335,12 @@ impl App {
                 if let Some((w, h)) = self.viewer_size {
                     *offset = text_view::clamp_offset(doc, w, h, *offset);
                 }
+                // At the end when one more row down would not move; only
+                // counts the rows up to the screen (see `clamp_offset`).
+                *at_end = down
+                    && self.viewer_size.is_some_and(|(w, h)| {
+                        text_view::clamp_offset(doc, w, h, offset.saturating_add(1)) == *offset
+                    });
             }
             Mode::Preview => self.preview_step(n, down),
             Mode::Sort { selected } => {
@@ -319,6 +355,16 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// Page keys in the text viewer: scroll by `n` screens (or half
+    /// screens) of the text area at the last draw, stopping at the end.
+    fn scroll_pages(&mut self, n: usize, half: bool, down: bool) {
+        let (Mode::Viewer { .. }, Some((_, h))) = (&self.mode, self.viewer_size) else {
+            return;
+        };
+        let page = if half { (h / 2).max(1) } else { h.max(1) };
+        self.move_by(n.saturating_mul(page as usize), down);
     }
 
     /// `j` / `k` in the preview: show the `n`-th next / previous image or
@@ -352,12 +398,14 @@ impl App {
             Mode::Viewer {
                 doc,
                 offset,
+                at_end,
                 diff: false,
             } => {
                 let switched = doc.toggle_markdown();
                 if switched {
                     // Row offsets of the two views do not correspond.
                     *offset = 0;
+                    *at_end = false;
                 }
                 switched.then(|| doc.shows_markdown_source())
             }
@@ -398,6 +446,7 @@ impl App {
                 self.mode = Mode::Viewer {
                     doc: TextDoc::diff(diff::title(&plan), &content),
                     offset: 0,
+                    at_end: false,
                     diff: true,
                 };
             }
@@ -974,6 +1023,81 @@ mod tests {
         // So `k` moves up right away.
         let _ = app.apply(Command::MoveUp(1));
         assert_eq!(viewer_offset(&app), max - 1);
+    }
+
+    fn viewer_at_end(app: &App) -> bool {
+        match &app.mode {
+            Mode::Viewer { at_end, .. } => *at_end,
+            _ => panic!("not in the viewer"),
+        }
+    }
+
+    #[test]
+    fn viewer_pages_stop_at_the_end() {
+        let tmp = tempfile::tempdir().unwrap();
+        let text: String = (1..=20).map(|i| format!("{i}\n")).collect();
+        fs::write(tmp.path().join("t.txt"), text).unwrap();
+        let mut app = app_in(tmp.path());
+        let _ = app.apply(Command::Open);
+        // Before the first draw the page size is unknown.
+        let _ = app.apply(Command::PageDown(1));
+        assert_eq!(viewer_offset(&app), 0);
+        // 20 rows on a screen of 6: the last page starts at row 14.
+        app.viewer_size = Some((20, 6));
+        let _ = app.apply(Command::PageDown(1));
+        assert_eq!(viewer_offset(&app), 6);
+        let _ = app.apply(Command::HalfPageDown(1));
+        assert_eq!(viewer_offset(&app), 9);
+        let _ = app.apply(Command::HalfPageUp(1));
+        assert_eq!(viewer_offset(&app), 6);
+        let _ = app.apply(Command::PageUp(1));
+        assert_eq!(viewer_offset(&app), 0);
+        let _ = app.apply(Command::PageDown(2));
+        assert_eq!(viewer_offset(&app), 12);
+        assert!(!viewer_at_end(&app));
+        let _ = app.apply(Command::PageDown(1));
+        assert_eq!(viewer_offset(&app), 14);
+        assert!(viewer_at_end(&app));
+        let _ = app.apply(Command::PageUp(5));
+        assert_eq!(viewer_offset(&app), 0);
+        // Half a screen of 1 row is still one row.
+        app.viewer_size = Some((20, 1));
+        let _ = app.apply(Command::HalfPageDown(1));
+        assert_eq!(viewer_offset(&app), 1);
+    }
+
+    #[test]
+    fn viewer_remembers_being_at_the_end_until_moving_up() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("t.txt"), "1\n2\n3\n4\n5\n").unwrap();
+        let mut app = app_in(tmp.path());
+        let _ = app.apply(Command::Open);
+        app.viewer_size = Some((20, 3));
+        assert!(!viewer_at_end(&app));
+        let _ = app.apply(Command::GoBottom);
+        assert!(viewer_at_end(&app));
+        // `j` at the end stays at the end.
+        let _ = app.apply(Command::MoveDown(1));
+        assert!(viewer_at_end(&app));
+        for up in [Command::MoveUp(1), Command::PageUp(1), Command::GoTop] {
+            let _ = app.apply(Command::GoBottom);
+            let _ = app.apply(up);
+            assert!(!viewer_at_end(&app), "{up:?}");
+        }
+        // `j` reaching the end sets it; one row short does not.
+        let _ = app.apply(Command::MoveDown(1));
+        assert!(!viewer_at_end(&app));
+        let _ = app.apply(Command::MoveDown(1));
+        assert!(viewer_at_end(&app));
+        // Switching to the Markdown source restarts at the top.
+        let _ = app.apply(Command::Back);
+        fs::write(tmp.path().join("t.md"), "a\n\nb\n\nc\n\nd\n").unwrap();
+        let _ = app.apply(Command::Refresh);
+        app.current_pane_mut().selected = 0;
+        let _ = app.apply(Command::Open);
+        let _ = app.apply(Command::GoBottom);
+        let _ = app.apply(Command::ToggleMarkdown);
+        assert!(!viewer_at_end(&app));
     }
 
     #[test]

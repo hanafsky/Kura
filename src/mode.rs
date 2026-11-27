@@ -19,6 +19,10 @@ pub enum Mode {
         /// Rendered text (title, lines); see [`crate::text_view`].
         doc: crate::text_view::TextDoc,
         offset: usize,
+        /// Scrolled to the end (`G`, or `j` / a page down reaching it):
+        /// the draw keeps the last row at the bottom when the size
+        /// changes. Moving up clears it.
+        at_end: bool,
         /// Showing `git diff` output (`D`): lines are coloured and
         /// `q` / `Esc` close the viewer instead of quitting.
         diff: bool,
