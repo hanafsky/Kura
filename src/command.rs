@@ -18,7 +18,7 @@ use crate::media::open_external;
 use crate::mode::{Mode, PaneType};
 use crate::paste::ConflictChoice;
 use crate::preview::{prefetch_around, step_media};
-use crate::text_view::TextDoc;
+use crate::text_view::{self, TextDoc};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {
@@ -135,8 +135,12 @@ impl App {
                     pane.selected = pane.items.len().saturating_sub(1);
                 }
                 Mode::Viewer { offset, doc, .. } => {
-                    let total = doc.line_count();
-                    *offset = total.saturating_sub(1);
+                    // The last wrapped row at the bottom of the screen; the
+                    // draw limits the offset when the size is not known yet.
+                    *offset = match self.viewer_size {
+                        Some((w, h)) => text_view::max_offset(doc, w, h),
+                        None => usize::MAX,
+                    };
                 }
                 _ => {}
             },
@@ -292,12 +296,15 @@ impl App {
                 }
                 self.update_visual_marks();
             }
-            Mode::Viewer { offset, .. } => {
+            Mode::Viewer { offset, doc, .. } => {
                 *offset = if down {
                     offset.saturating_add(n)
                 } else {
                     offset.saturating_sub(n)
                 };
+                if let Some((w, h)) = self.viewer_size {
+                    *offset = text_view::clamp_offset(doc, w, h, *offset);
+                }
             }
             Mode::Preview => self.preview_step(n, down),
             Mode::Sort { selected } => {
@@ -904,8 +911,19 @@ mod tests {
         let _ = app.apply(Command::Open);
         let _ = app.apply(Command::MoveDown(3));
         assert!(matches!(app.mode, Mode::Viewer { offset: 3, .. }));
+        // Before the first draw the size is unknown: the draw clamps.
         let _ = app.apply(Command::GoBottom);
-        assert!(matches!(app.mode, Mode::Viewer { offset: 4, .. }));
+        assert!(matches!(
+            app.mode,
+            Mode::Viewer {
+                offset: usize::MAX,
+                ..
+            }
+        ));
+        // 5 rows on a screen of 3: the last page starts at row 2.
+        app.viewer_size = Some((20, 3));
+        let _ = app.apply(Command::GoBottom);
+        assert!(matches!(app.mode, Mode::Viewer { offset: 2, .. }));
         let _ = app.apply(Command::GoTop);
         assert!(matches!(app.mode, Mode::Viewer { offset: 0, .. }));
         let _ = app.apply(Command::Back);
@@ -918,10 +936,44 @@ mod tests {
         fs::write(tmp.path().join("big.txt"), "x\n".repeat(70_000)).unwrap();
         let mut app = app_in(tmp.path());
         let _ = app.apply(Command::Open);
+        app.viewer_size = Some((20, 1));
         let _ = app.apply(Command::GoBottom);
         assert!(matches!(app.mode, Mode::Viewer { offset: 69_999, .. }));
+        let _ = app.apply(Command::MoveUp(10));
+        assert!(matches!(app.mode, Mode::Viewer { offset: 69_989, .. }));
         let _ = app.apply(Command::MoveDown(10));
-        assert!(matches!(app.mode, Mode::Viewer { offset: 70_009, .. }));
+        assert!(matches!(app.mode, Mode::Viewer { offset: 69_999, .. }));
+    }
+
+    fn viewer_offset(app: &App) -> usize {
+        match &app.mode {
+            Mode::Viewer { offset, .. } => *offset,
+            _ => panic!("not in the viewer"),
+        }
+    }
+
+    #[test]
+    fn viewer_go_bottom_and_scrolling_stop_at_the_last_wrapped_row() {
+        let tmp = tempfile::tempdir().unwrap();
+        // One Markdown paragraph (one document line) of many rows.
+        let text = format!("# T\n\n{}\n", "日本語の段落を折り返す。".repeat(10));
+        fs::write(tmp.path().join("p.md"), &text).unwrap();
+        let mut app = app_in(tmp.path());
+        let _ = app.apply(Command::Open);
+        app.viewer_size = Some((22, 4));
+        let max = text_view::max_offset(viewer_doc(&app), 22, 4);
+        assert!(max >= viewer_doc(&app).line_count(), "{max}");
+        let _ = app.apply(Command::GoBottom);
+        assert_eq!(viewer_offset(&app), max);
+        // `j` and a count (`5j`) do not go past the end.
+        let _ = app.apply(Command::MoveDown(1));
+        assert_eq!(viewer_offset(&app), max);
+        let _ = app.apply(Command::GoTop);
+        let _ = app.apply(Command::MoveDown(1).with_count(1000));
+        assert_eq!(viewer_offset(&app), max);
+        // So `k` moves up right away.
+        let _ = app.apply(Command::MoveUp(1));
+        assert_eq!(viewer_offset(&app), max - 1);
     }
 
     #[test]

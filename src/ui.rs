@@ -56,11 +56,15 @@ pub fn ui(f: &mut Frame, app: &mut App) {
         (chunks[1], None)
     };
 
-    if let Mode::Viewer { doc, offset, .. } = &app.mode {
+    if let Mode::Viewer { doc, offset, .. } = &mut app.mode {
         let block = Block::default()
             .borders(Borders::ALL)
             .title(doc.title.as_str());
-        text_view::draw(f, content_area, block, doc, *offset);
+        // The offset is limited to the current size here, so that it also
+        // follows a terminal resize.
+        let (size, clamped) = text_view::draw(f, content_area, block, doc, *offset);
+        *offset = clamped;
+        app.viewer_size = Some(size);
     } else {
         let panes = Layout::default()
             .direction(Direction::Horizontal)
@@ -370,7 +374,9 @@ fn draw_text_preview(f: &mut Frame, area: Rect, content: &PreviewContent) {
         ))
         .title_bottom(Line::from(" P: close preview ").right_aligned());
     match content {
-        PreviewContent::Text(doc) => text_view::draw(f, area, block, doc, 0),
+        PreviewContent::Text(doc) => {
+            text_view::draw(f, area, block, doc, 0);
+        }
         PreviewContent::Message(msg) => f.render_widget(
             Paragraph::new(Span::styled(msg.as_str(), Style::default().fg(Color::Gray)))
                 .block(block),
@@ -484,6 +490,47 @@ mod tests {
             title(&pane).contains("[no ignored]"),
             pane.ignore_filter_active()
         );
+    }
+
+    /// Every row of the screen.
+    fn full_screen(app: &mut App, w: u16, h: u16) -> Vec<String> {
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| ui(f, app)).unwrap();
+        let buf = term.backend().buffer();
+        (0..h)
+            .map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect()
+    }
+
+    #[test]
+    fn viewer_go_bottom_puts_the_last_wrapped_row_at_the_bottom() {
+        let tmp = tempfile::tempdir().unwrap();
+        let long = "あいうえおかきくけこ".repeat(6);
+        std::fs::write(tmp.path().join("t.txt"), format!("{long}\nLAST\n")).unwrap();
+        let mut app = App::with_dir(
+            ratatui_image::picker::Picker::halfblocks(),
+            tmp.path().to_path_buf(),
+        )
+        .unwrap();
+        let _ = app.apply(crate::command::Command::Open);
+        let _ = app.apply(crate::command::Command::GoBottom);
+        // Header, viewer border, 4 text rows, border, status line.
+        let rows = full_screen(&mut app, 24, 8);
+        assert!(rows[5].contains("LAST"), "{rows:#?}");
+        assert!(!rows[4].contains("LAST"));
+        let Mode::Viewer { offset, doc, .. } = &app.mode else {
+            panic!("not in the viewer");
+        };
+        // The draw kept the offset it showed, for `k` to start from.
+        assert_eq!(app.viewer_size, Some((22, 4)));
+        assert_eq!(*offset, text_view::max_offset(doc, 22, 4));
+        // A wider terminal has fewer rows: the offset follows it.
+        let rows = full_screen(&mut app, 60, 8);
+        assert!(rows[5].contains("LAST"), "{rows:#?}");
+        let Mode::Viewer { offset, doc, .. } = &app.mode else {
+            panic!("not in the viewer");
+        };
+        assert_eq!(*offset, text_view::max_offset(doc, 58, 4));
     }
 
     /// The right half of the screen (the preview, with the left pane active).
