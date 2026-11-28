@@ -230,6 +230,23 @@ The directories shown in the two panes are watched, and the listing updates by i
 - Files that no longer exist stay in the list, dimmed and marked `(deleted)`; `Enter` on one goes to the directory it was in.
 - Only edits made with the file tools are logged. Files changed by shell commands the agent runs (`mv`, `rm`, `sed -i`, formatters, …) are not.
 
+### Controlling kura from outside (`kura msg`)
+
+A running kura accepts commands from other programs (coding agents, scripts, your editor):
+
+```sh
+kura msg reveal src/main.rs   # show the file in the active pane, cursor on it
+kura msg cd ~/project         # move the active pane to the directory
+```
+
+Relative paths are resolved against the sender's working directory. The message goes to:
+
+1. the socket given with `--socket <PATH>`, else
+2. `$KURA_SOCKET` — kura sets it for the programs it starts (the editor opened with `e`, …), so they reach their own kura, else
+3. the most recently started kura that is still running.
+
+Each kura listens on `$XDG_RUNTIME_DIR/kura/kura-<pid>.sock` (or `<temp dir>/kura-<uid>/kura-<pid>.sock` when `XDG_RUNTIME_DIR` is unset); the socket is removed on exit. Views (text viewer, preview, sort menu, agent changes list) are closed first; while a prompt or dialog is open (search, rename, delete confirmation) the command is refused. kura answers after carrying out the command: when it failed or was refused, `kura msg` prints the reason and exits with a non-zero status. A command that kura cannot take within 3 seconds (e.g. while the editor started with `e` is open) is dropped and reported as timed out. The protocol is one JSON object per line (`{"cmd":"reveal","path":"/abs/path"}`), answered with `{"ok":true}` or `{"ok":false,"error":"..."}`. To open a directory named `msg`, write `kura ./msg`.
+
 ## Herdr plugin
 
 kura can be opened as a pane of [Herdr](https://herdr.dev/) (the TUI terminal workspace manager for coding agents), next to your agents, in the directory of the focused pane.

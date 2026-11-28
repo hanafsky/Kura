@@ -592,6 +592,21 @@ mod tests {
         assert_eq!(app.current_pane().marked_count(), 1);
     }
 
+    #[test]
+    fn kura_msg_closes_the_list_and_runs() {
+        let (proj, _state, mut app) = setup(&["b.md"]);
+        let _ = app.apply(Command::ToggleAgentChanges);
+        let reveal = Command::Reveal(proj.path().join("src/a.rs"));
+        assert_eq!(app.apply_external(reveal), Ok(()));
+        assert!(matches!(app.mode, Mode::Filer));
+        assert_eq!(app.selected_path(), Some(proj.path().join("src/a.rs")));
+        let _ = app.apply(Command::ToggleAgentChanges);
+        let cd = Command::ChangeDir(proj.path().join("src"));
+        assert_eq!(app.apply_external(cd), Ok(()));
+        assert!(matches!(app.mode, Mode::Filer));
+        assert_eq!(app.current_pane().current_dir, proj.path().join("src"));
+    }
+
     /// `Y` in the list goes through the same herdr sending as the file list.
     #[cfg(unix)]
     mod herdr {

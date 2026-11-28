@@ -14,6 +14,7 @@ use std::{io, io::Write};
 use crate::app::App;
 use crate::command::Command;
 use crate::delete_confirm::{confirm_key, ConfirmAction, DeleteKind};
+use crate::ipc;
 use crate::mode::Mode;
 use crate::paste::conflict_choice;
 use crate::watch::{self, DirWatcher, FsEvent};
@@ -133,7 +134,10 @@ const SEND_TARGET_KEYS: Bindings = &[
 ];
 
 fn lookup(table: Bindings, code: KeyCode) -> Option<Command> {
-    table.iter().find(|(k, _)| *k == code).map(|&(_, cmd)| cmd)
+    table
+        .iter()
+        .find(|(k, _)| *k == code)
+        .map(|(_, cmd)| cmd.clone())
 }
 
 /// Key bindings of the current mode (after the global keys are handled).
@@ -271,6 +275,7 @@ pub fn run_app<B: Backend<Error = io::Error> + Write>(
     terminal: &mut Terminal<B>,
     app: &mut App,
     typeahead: Vec<KeyCode>,
+    ipc_requests: &mpsc::Receiver<ipc::Incoming>,
 ) -> io::Result<()> {
     let (tx, fs_events) = mpsc::channel::<FsEvent>();
     let mode = watch::parse_watch_mode(std::env::var(watch::WATCH_ENV).ok().as_deref());
@@ -315,6 +320,10 @@ pub fn run_app<B: Backend<Error = io::Error> + Write>(
                 Event::Resize(..) => dirty = true,
                 _ => {}
             }
+        }
+        while let Ok(incoming) = ipc_requests.try_recv() {
+            dirty = true;
+            incoming.run(|request| app.apply_external(request.into_command()));
         }
         while let Ok(fs_event) = fs_events.try_recv() {
             app.handle_fs_event(&fs_event);
