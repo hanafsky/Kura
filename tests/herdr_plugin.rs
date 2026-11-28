@@ -41,17 +41,26 @@ impl Env {
     }
 
     fn run(&self, entry: &str, context_json: &str) -> Output {
+        self.run_with(entry, context_json, &[])
+    }
+
+    /// Like [`Env::run`], with extra environment variables.
+    fn run_with(&self, entry: &str, context_json: &str, vars: &[(&str, &Path)]) -> Output {
         let bin = self.path().join("bin");
-        Command::new("sh")
-            .arg(LAUNCHER)
+        let mut cmd = Command::new("sh");
+        cmd.arg(LAUNCHER)
             .arg(entry)
             // Keep the system tools (sed) but not a real kura or herdr.
             .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
             .env("HERDR_BIN_PATH", bin.join("herdr"))
             .env("HERDR_PLUGIN_CONTEXT_JSON", context_json)
             .env("HOME", self.path())
-            .output()
-            .unwrap()
+            .env_remove("HERDR_PANE_ID")
+            .env_remove("HERDR_PLUGIN_CONFIG_DIR");
+        for (k, v) in vars {
+            cmd.env(k, v);
+        }
+        cmd.output().unwrap()
     }
 
     /// The arguments of every stub `herdr` call, in order.
@@ -175,6 +184,92 @@ fn unknown_entry_is_rejected() {
     assert!(!env.herdr_args().contains(&"pane".to_string()));
 }
 
+/// The plugin config directory, with the opt-in file when `opted_in`.
+fn config_dir(env: &Env, opted_in: bool) -> PathBuf {
+    let dir = mkdir(env, "config");
+    if opted_in {
+        fs::write(dir.join("open-on-worktree-created"), "").unwrap();
+    }
+    dir
+}
+
+#[test]
+fn worktree_hook_does_nothing_without_the_opt_in_file() {
+    // Not even a "kura is not on PATH" notification.
+    let env = Env::new(false);
+    let wt = mkdir(&env, "wt");
+    let config = config_dir(&env, false);
+    let out = env.run_with(
+        "worktree",
+        &context(&wt, &wt),
+        &[("HERDR_PLUGIN_CONFIG_DIR", &config)],
+    );
+    assert!(out.status.success(), "{out:?}");
+    assert!(out.stderr.is_empty(), "{out:?}");
+    assert!(env.herdr_args().is_empty());
+    // Without a config directory either.
+    let out = env.run("worktree", &context(&wt, &wt));
+    assert!(out.status.success(), "{out:?}");
+    assert!(env.herdr_args().is_empty());
+}
+
+#[test]
+fn worktree_hook_splits_beside_the_event_pane_without_focus() {
+    let env = Env::new(true);
+    let wt = mkdir(&env, "wt");
+    let config = config_dir(&env, true);
+    let out = env.run_with(
+        "worktree",
+        &context(&wt, &wt),
+        &[
+            ("HERDR_PLUGIN_CONFIG_DIR", &config),
+            ("HERDR_PANE_ID", Path::new("w2:p1")),
+        ],
+    );
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(
+        env.herdr_args(),
+        pane_open(
+            "split",
+            &wt,
+            &[
+                "--target-pane",
+                "w2:p1",
+                "--direction",
+                "right",
+                "--no-focus"
+            ]
+        )
+    );
+}
+
+#[test]
+fn worktree_hook_falls_back_to_the_focused_pane_id() {
+    let env = Env::new(true);
+    let wt = mkdir(&env, "wt");
+    let config = config_dir(&env, true);
+    let out = env.run_with(
+        "worktree",
+        &context(&wt, &wt),
+        &[("HERDR_PLUGIN_CONFIG_DIR", &config)],
+    );
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(
+        env.herdr_args(),
+        pane_open(
+            "split",
+            &wt,
+            &[
+                "--target-pane",
+                "w1:p1",
+                "--direction",
+                "right",
+                "--no-focus"
+            ]
+        )
+    );
+}
+
 #[test]
 fn manifest_declares_the_launcher_actions_and_panes() {
     let manifest =
@@ -183,6 +278,8 @@ fn manifest_declares_the_launcher_actions_and_panes() {
         "id = \"kura\"",
         "command = [\"sh\", \"herdr/open.sh\", \"split\"]",
         "command = [\"sh\", \"herdr/open.sh\", \"popup\"]",
+        "on = \"worktree.created\"",
+        "command = [\"sh\", \"herdr/open.sh\", \"worktree\"]",
         "placement = \"split\"",
         "placement = \"popup\"",
     ] {

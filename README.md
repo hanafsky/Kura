@@ -125,6 +125,7 @@ sudo apt install ffmpeg
 - `n` / `N`: Jump to the next / previous match of the last search (wrapping around).
 - `R`: Reload both panes from disk (cursor and marks stay on the same files). Useful with `KURA_WATCH=off` or when a change was missed.
 - `A`: List the files the coding agent (Claude Code) changed in the current pane, newest first (see [Files changed by the agent](#files-changed-by-the-agent)). In the list, `j` / `k` (with numeric prefixes), `gg` / `G` move, `Enter` goes to the file in its directory (closing the list), `e` opens it in your editor, `Y` copies it as an `@path` like `Y` in the file list, `R` re-reads the log, and `A`, `q` or `Esc` returns to the file list.
+- `W`: List the git worktrees of the current pane's repository (`git worktree list --porcelain`) in the current pane. Each row shows the branch (or `(detached …)`), the path and, inside Herdr or Herdr.app (`hc`), the agents whose working directory is in that worktree; `*` marks the worktree the pane is in. In the list, `j` / `k` (with numeric prefixes), `gg` / `G` move, `Enter` opens the worktree in the current pane (closing the list), `R` reads the list again, and `W`, `q` or `Esc` returns to the file list. Outside a git repository the status line says so.
 - `r`: Rename the selected file; an inline prompt appears at the bottom.
 - `s`: Open a sort popup to choose ordering (modified/created/size/alphabetical). The chosen order is kept per pane, also when moving to another directory. The last row, `Directories first: on/off`, toggles listing directories before files (on by default).
 - `x`: Move the selected entry or all marked entries to the OS trash, after confirmation (`y` confirms; `n` / `Esc` / `Enter` / `q` cancel). If the trash is not available (e.g. on WSL or some Linux setups), an error is shown in the status line and nothing is deleted.
@@ -287,5 +288,15 @@ Notes on the popup:
 - A popup receives every key, including `Esc` and the Herdr prefix, so you cannot switch panes while it is open. `Esc` does not close it; quit kura with `q`.
 - A popup has no pane ID (no `HERDR_PANE_ID`) and is not part of the layout. Use the split when you want kura to stay open beside your agents.
 - It does not open while another Herdr popup or modal (Settings, Copy mode) is open.
+
+### Open kura in new worktrees (opt-in)
+
+The plugin can also open kura whenever Herdr creates a worktree (`herdr worktree create`, or the worktree command in the UI): it splits kura to the right of the new worktree's pane, in that worktree, without moving the focus, also when the worktree's workspace is not the focused one. This is off by default, because event hooks run for everyone who installed the plugin. To turn it on, create an empty file named `open-on-worktree-created` in the plugin's config directory:
+
+```bash
+touch "$(herdr plugin config-dir kura)/open-on-worktree-created"
+```
+
+Delete the file to turn it off again. No restart is needed.
 
 If nothing opens, check `herdr plugin log list --plugin kura`. To try a local checkout, use `herdr plugin link /path/to/Kura` instead of `install`.
