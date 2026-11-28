@@ -2,12 +2,14 @@
 
 use std::path::{Path, PathBuf};
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 
 /// A two-pane TUI file manager.
 #[derive(Parser, Debug, PartialEq, Eq)]
 #[command(name = "kura", version)]
 pub struct Cli {
+    #[command(subcommand)]
+    pub command: Option<CliCommand>,
     /// Directory for the left pane [default: current directory]
     pub left: Option<PathBuf>,
     /// Directory for the right pane [default: current directory]
@@ -15,6 +17,30 @@ pub struct Cli {
     /// On exit, write the active pane's directory to FILE (for cd-on-exit)
     #[arg(long, value_name = "FILE")]
     pub last_dir_path: Option<PathBuf>,
+}
+
+#[derive(Subcommand, Debug, PartialEq, Eq)]
+pub enum CliCommand {
+    /// Send a command to a running kura (use `./msg` for a directory named msg)
+    Msg {
+        /// Socket of the kura to send to [default: $KURA_SOCKET, else the
+        /// most recently started kura]
+        #[arg(long, value_name = "PATH", global = true)]
+        socket: Option<PathBuf>,
+        #[command(subcommand)]
+        message: Message,
+    },
+}
+
+#[derive(Subcommand, Debug, PartialEq, Eq)]
+pub enum Message {
+    /// Show PATH in the active pane with the cursor on it
+    Reveal { path: PathBuf },
+    /// Move the active pane to DIR
+    Cd {
+        #[arg(value_name = "DIR")]
+        path: PathBuf,
+    },
 }
 
 /// Resolve a pane's starting directory: `arg` relative to `cwd`, or `cwd`
@@ -47,6 +73,7 @@ mod tests {
         assert_eq!(
             parse(&[]).unwrap(),
             Cli {
+                command: None,
                 left: None,
                 right: None,
                 last_dir_path: None
@@ -85,6 +112,42 @@ mod tests {
             ErrorKind::UnknownArgument
         );
         assert!(parse(&["--last-dir-path"]).is_err());
+    }
+
+    #[test]
+    fn msg_subcommands() {
+        let cli = parse(&["msg", "reveal", "src/main.rs"]).unwrap();
+        assert_eq!(
+            cli.command,
+            Some(CliCommand::Msg {
+                socket: None,
+                message: Message::Reveal {
+                    path: PathBuf::from("src/main.rs")
+                }
+            })
+        );
+        for args in [
+            ["msg", "--socket", "/s", "cd", "d"],
+            ["msg", "cd", "d", "--socket", "/s"],
+        ] {
+            assert_eq!(
+                parse(&args).unwrap().command,
+                Some(CliCommand::Msg {
+                    socket: Some(PathBuf::from("/s")),
+                    message: Message::Cd {
+                        path: PathBuf::from("d")
+                    }
+                })
+            );
+        }
+        assert!(parse(&["msg"]).is_err());
+        assert!(parse(&["msg", "reveal"]).is_err());
+        assert!(parse(&["msg", "rm", "x"]).is_err());
+        // A directory named like the subcommand needs a path spelling.
+        assert_eq!(
+            parse(&["./msg"]).unwrap().left,
+            Some(PathBuf::from("./msg"))
+        );
     }
 
     #[test]
