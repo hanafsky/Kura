@@ -23,6 +23,7 @@ mod terminal;
 mod text_view;
 mod ui;
 mod watch;
+mod worktrees;
 
 use app::App;
 use clap::Parser;

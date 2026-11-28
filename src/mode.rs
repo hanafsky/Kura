@@ -58,6 +58,12 @@ pub enum Mode {
         items: Vec<PathBuf>,
         selected: usize,
     },
+    /// Git worktrees of the active pane's repository (`W`), listed in the
+    /// active pane; see [`crate::worktrees`].
+    Worktrees {
+        items: Vec<crate::worktrees::Worktree>,
+        selected: usize,
+    },
     /// Choose the agent pane to send `@path` references to (`Y` in herdr
     /// with several agents).
     SendTarget {
