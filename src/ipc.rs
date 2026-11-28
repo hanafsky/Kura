@@ -199,20 +199,42 @@ pub struct Server {
 }
 
 impl Server {
-    /// Listen in the default socket directory (see the module docs).
+    /// Listen in the default socket directory (see the module docs) and
+    /// put the socket in [`SOCKET_ENV`] for the programs kura starts. On
+    /// failure the variable is removed, so that they do not reach the kura
+    /// this one was started from. Call before any other thread exists.
     pub fn start<E: Send + 'static>(tx: Sender<E>, wrap: fn(Request) -> E) -> io::Result<Self> {
-        let dir = default_socket_dir();
-        ensure_private_dir(&dir)?;
-        Self::start_at(dir.join(socket_name(std::process::id())), tx, wrap)
+        let result = Self::bind_default().map(|(server, listener)| {
+            std::env::set_var(SOCKET_ENV, &server.path);
+            (server, listener)
+        });
+        let result = result.and_then(|(server, listener)| server.spawn(listener, tx, wrap));
+        if result.is_err() {
+            std::env::remove_var(SOCKET_ENV);
+        }
+        result
     }
 
-    /// Listen on `path`, replacing a socket left there by an earlier
-    /// process with the same id.
+    fn bind_default() -> io::Result<(Self, UnixListener)> {
+        let dir = default_socket_dir();
+        ensure_private_dir(&dir)?;
+        Self::bind(dir.join(socket_name(std::process::id())))
+    }
+
+    /// Listen on `path` (without touching the environment).
+    #[cfg(test)]
     pub fn start_at<E: Send + 'static>(
         path: PathBuf,
         tx: Sender<E>,
         wrap: fn(Request) -> E,
     ) -> io::Result<Self> {
+        let (server, listener) = Self::bind(path)?;
+        server.spawn(listener, tx, wrap)
+    }
+
+    /// Bind `path`, replacing a socket left there by an earlier process
+    /// with the same id.
+    fn bind(path: PathBuf) -> io::Result<(Self, UnixListener)> {
         if path
             .symlink_metadata()
             .is_ok_and(|m| m.file_type().is_socket())
@@ -220,14 +242,21 @@ impl Server {
             fs::remove_file(&path)?;
         }
         let listener = UnixListener::bind(&path)?;
+        Ok((Self { path }, listener))
+    }
+
+    /// Answer requests on a background thread. (On failure `self` is
+    /// dropped, which removes the socket.)
+    fn spawn<E: Send + 'static>(
+        self,
+        listener: UnixListener,
+        tx: Sender<E>,
+        wrap: fn(Request) -> E,
+    ) -> io::Result<Self> {
         std::thread::Builder::new()
             .name("kura-ipc".into())
             .spawn(move || serve(listener, tx, wrap))?;
-        Ok(Self { path })
-    }
-
-    pub fn path(&self) -> &Path {
-        &self.path
+        Ok(self)
     }
 }
 

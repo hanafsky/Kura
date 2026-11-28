@@ -75,17 +75,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    // Listen for `kura msg` before any thread starts, so that setting
-    // KURA_SOCKET (inherited by the editor and other children) is safe.
-    // Dropped at the end of main, which removes the socket.
+    // Listen for `kura msg` before any other thread starts: this also sets
+    // KURA_SOCKET (inherited by the editor and other children). Dropped at
+    // the end of main, which removes the socket.
     let (ipc_tx, ipc_rx) = std::sync::mpsc::channel();
-    let ipc_server = match ipc::Server::start(ipc_tx, |r| r) {
-        Ok(server) => {
-            std::env::set_var(ipc::SOCKET_ENV, server.path());
-            Ok(server)
-        }
-        Err(e) => Err(format!("kura msg disabled: {e}")),
-    };
+    let ipc_server =
+        ipc::Server::start(ipc_tx, |r| r).map_err(|e| format!("kura msg disabled: {e}"));
 
     terminal::install_panic_hook();
     // Start in ASCII (英数) input so Vim-like keys work immediately.
