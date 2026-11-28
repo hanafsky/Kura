@@ -102,6 +102,17 @@ pub fn ui(f: &mut Frame, app: &mut App) {
                 draw_changes(f, list_area, app, items, *selected);
                 draw_pane(f, pane_area, other, false, app.session_start);
             }
+            // Worktrees (`W`) replace the active pane.
+            Mode::Worktrees { items, selected } => {
+                let (list_area, pane_area) = if left_active {
+                    (panes[0], panes[1])
+                } else {
+                    (panes[1], panes[0])
+                };
+                let other = if left_active { &app.right } else { &app.left };
+                draw_worktrees(f, list_area, app, items, *selected);
+                draw_pane(f, pane_area, other, false, app.session_start);
+            }
             // Text preview (`P`) of the entry under the cursor.
             _ if app.text_preview.is_some() => {
                 let (pane_area, preview_area) = if left_active {
@@ -255,6 +266,7 @@ fn draw_status_line(f: &mut Frame, area: Rect, app: &App) {
     let pane = app.current_pane();
     let (selected, len) = match &app.mode {
         Mode::Changes { items, selected } => (*selected, items.len()),
+        Mode::Worktrees { items, selected } => (*selected, items.len()),
         _ => (pane.selected, pane.items.len()),
     };
     let mut info = if len == 0 {
@@ -445,6 +457,72 @@ fn draw_changes(f: &mut Frame, area: Rect, app: &App, items: &[PathBuf], selecte
                 ]),
             };
             ListItem::new(line)
+        })
+        .collect();
+    let mut state = ListState::default();
+    state.select(Some(selected));
+    let list = List::new(rows)
+        .block(block)
+        .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
+        .highlight_symbol(">> ");
+    f.render_stateful_widget(list, area, &mut state);
+}
+
+/// Worktree list (`W`): `*` marks the worktree the pane is in; each row
+/// shows the checkout, the path and the agents working there.
+fn draw_worktrees(
+    f: &mut Frame,
+    area: Rect,
+    app: &App,
+    items: &[crate::worktrees::Worktree],
+    selected: usize,
+) {
+    let current = app.current_worktree(items);
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(Span::styled(
+            " Worktrees ",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .title_bottom(Line::from(" Enter: open  R: reload  W/q/Esc: close ").right_aligned());
+    let width = items
+        .iter()
+        .map(|w| UnicodeWidthStr::width(w.checkout().as_str()))
+        .max()
+        .unwrap_or(0);
+    let rows: Vec<ListItem> = items
+        .iter()
+        .enumerate()
+        .map(|(i, wt)| {
+            let checkout = wt.checkout();
+            let pad = width.saturating_sub(UnicodeWidthStr::width(checkout.as_str()));
+            let mark = if current == Some(i) { "* " } else { "  " };
+            let mut spans = vec![
+                Span::raw(mark),
+                Span::styled(
+                    format!("{checkout}{}  ", " ".repeat(pad)),
+                    Style::default().fg(Color::Green),
+                ),
+                Span::styled(
+                    crate::worktrees::display_path(&wt.path, home.as_deref()),
+                    Style::default().fg(Color::Blue),
+                ),
+            ];
+            for (flag, text) in [(wt.locked, " (locked)"), (wt.prunable, " (prunable)")] {
+                if flag {
+                    spans.push(Span::styled(text, Style::default().fg(Color::DarkGray)));
+                }
+            }
+            if !wt.agents.is_empty() {
+                spans.push(Span::styled(
+                    format!("  {}", wt.agents.join(", ")),
+                    Style::default().fg(Color::Magenta),
+                ));
+            }
+            ListItem::new(Line::from(spans))
         })
         .collect();
     let mut state = ListState::default();

@@ -108,6 +108,9 @@ pub enum Command {
     /// List the files the coding agent changed in the active pane (`A`),
     /// or go back to the file list.
     ToggleAgentChanges,
+    /// List the git worktrees of the active pane's repository (`W`), or
+    /// go back to the file list.
+    ToggleWorktrees,
     /// Sort by the highlighted option.
     SortConfirm,
     /// Type a character into the search query or rename buffer.
@@ -146,6 +149,7 @@ impl App {
     pub fn apply(&mut self, cmd: Command) -> ControlFlow<()> {
         let filer = matches!(self.mode, Mode::Filer);
         let changes = matches!(self.mode, Mode::Changes { .. });
+        let worktrees = matches!(self.mode, Mode::Worktrees { .. });
         match cmd {
             Command::Quit => return ControlFlow::Break(()),
             Command::MoveDown(n) => self.move_by(n, true),
@@ -157,6 +161,7 @@ impl App {
             Command::GoTop => match &mut self.mode {
                 Mode::Filer => self.current_pane_mut().selected = 0,
                 Mode::Changes { selected, .. } => *selected = 0,
+                Mode::Worktrees { selected, .. } => *selected = 0,
                 Mode::Viewer { offset, at_end, .. } => {
                     *offset = 0;
                     *at_end = false;
@@ -169,6 +174,7 @@ impl App {
                     pane.selected = pane.items.len().saturating_sub(1);
                 }
                 Mode::Changes { .. } => self.select_change(usize::MAX),
+                Mode::Worktrees { .. } => self.move_worktree_cursor(usize::MAX, true),
                 Mode::Viewer {
                     offset,
                     doc,
@@ -195,6 +201,7 @@ impl App {
             },
             Command::Open if filer => self.open_selected(),
             Command::Open if changes => self.jump_to_change(),
+            Command::Open if worktrees => self.open_selected_worktree(),
             Command::OpenExternal if filer || matches!(self.mode, Mode::Preview) => {
                 if let Some(p) = self.selected_path() {
                     if let Err(e) = open_external(&p) {
@@ -278,6 +285,9 @@ impl App {
             }
             Command::ToggleAgentChanges if filer => self.open_agent_changes(),
             Command::ToggleAgentChanges if changes => self.mode = Mode::Filer,
+            Command::Refresh if worktrees => self.reload_worktrees(),
+            Command::ToggleWorktrees if filer => self.open_worktrees(),
+            Command::ToggleWorktrees if worktrees => self.mode = Mode::Filer,
             Command::ToggleTextPreview if filer => self.toggle_text_preview(),
             Command::ToggleMarkdown => self.toggle_markdown(),
             Command::SortConfirm => {
@@ -370,7 +380,8 @@ impl App {
             Mode::Viewer { .. }
             | Mode::Sort { .. }
             | Mode::Visual { .. }
-            | Mode::Changes { .. } => {
+            | Mode::Changes { .. }
+            | Mode::Worktrees { .. } => {
                 self.mode = Mode::Filer;
                 true
             }
@@ -462,6 +473,7 @@ impl App {
             }
             Mode::Preview => self.preview_step(n, down),
             Mode::Changes { .. } => self.move_change_cursor(n, down),
+            Mode::Worktrees { .. } => self.move_worktree_cursor(n, down),
             Mode::SendTarget {
                 selected, targets, ..
             } => {

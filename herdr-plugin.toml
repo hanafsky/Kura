@@ -27,6 +27,13 @@ title = "Open kura (popup)"
 contexts = ["workspace"]
 command = ["sh", "herdr/open.sh", "popup"]
 
+# Opt-in: when a herdr worktree is created, open kura beside its pane
+# (without moving the focus). Does nothing unless the file
+# "$(herdr plugin config-dir kura)/open-on-worktree-created" exists.
+[[events]]
+on = "worktree.created"
+command = ["sh", "herdr/open.sh", "worktree"]
+
 # Pane commands run in the directory passed by the launcher (`--cwd`), so they
 # must not use paths relative to the plugin directory: `kura` is found on PATH.
 [[panes]]

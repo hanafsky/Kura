@@ -50,6 +50,7 @@ const FILER_KEYS: Bindings = &[
     (KeyCode::Char('D'), Command::Diff),
     (KeyCode::Char('R'), Command::Refresh),
     (KeyCode::Char('A'), Command::ToggleAgentChanges),
+    (KeyCode::Char('W'), Command::ToggleWorktrees),
 ];
 
 /// Agent changes list (`A`).
@@ -61,6 +62,19 @@ const CHANGES_KEYS: Bindings = &[
     (KeyCode::Char('Y'), Command::CopyAtPaths),
     (KeyCode::Char('R'), Command::Refresh),
     (KeyCode::Char('A'), Command::ToggleAgentChanges),
+    (KeyCode::Esc, Command::Back),
+    (KeyCode::Char('q'), Command::Back),
+];
+
+/// Worktree list (`W`).
+const WORKTREE_KEYS: Bindings = &[
+    (KeyCode::Char('j'), Command::MoveDown(1)),
+    (KeyCode::Down, Command::MoveDown(1)),
+    (KeyCode::Char('k'), Command::MoveUp(1)),
+    (KeyCode::Up, Command::MoveUp(1)),
+    (KeyCode::Enter, Command::Open),
+    (KeyCode::Char('R'), Command::Refresh),
+    (KeyCode::Char('W'), Command::ToggleWorktrees),
     (KeyCode::Esc, Command::Back),
     (KeyCode::Char('q'), Command::Back),
 ];
@@ -149,6 +163,7 @@ fn mode_command(mode: &Mode, code: KeyCode) -> Option<Command> {
         Mode::Viewer { .. } => lookup(VIEWER_KEYS, code),
         Mode::Preview => lookup(PREVIEW_KEYS, code),
         Mode::Changes { .. } => lookup(CHANGES_KEYS, code),
+        Mode::Worktrees { .. } => lookup(WORKTREE_KEYS, code),
         Mode::Sort { .. } => lookup(SORT_KEYS, code),
         Mode::SendTarget { .. } => lookup(SEND_TARGET_KEYS, code),
         Mode::Search { .. } => Some(match code {
@@ -199,9 +214,12 @@ impl KeyState {
             mode,
             Mode::ConfirmDelete { .. } | Mode::PasteConflict { .. } | Mode::SendTarget { .. }
         );
-        // In the diff viewer and the agent changes list 'q' closes them
-        // (see DIFF_KEYS, CHANGES_KEYS).
-        let q_closes = matches!(mode, Mode::Viewer { diff: true, .. } | Mode::Changes { .. });
+        // In the diff viewer and the agent changes and worktree lists 'q'
+        // closes them (see DIFF_KEYS, CHANGES_KEYS, WORKTREE_KEYS).
+        let q_closes = matches!(
+            mode,
+            Mode::Viewer { diff: true, .. } | Mode::Changes { .. } | Mode::Worktrees { .. }
+        );
         if code == KeyCode::Char('q') && !text_input && !in_dialog && !q_closes {
             return Some(Command::Quit);
         }
@@ -209,7 +227,11 @@ impl KeyState {
         if let KeyCode::Char(c) = code {
             if matches!(
                 mode,
-                Mode::Filer | Mode::Viewer { .. } | Mode::Preview | Mode::Changes { .. }
+                Mode::Filer
+                    | Mode::Viewer { .. }
+                    | Mode::Preview
+                    | Mode::Changes { .. }
+                    | Mode::Worktrees { .. }
             ) && c.is_ascii_digit()
             {
                 self.prefix = self
@@ -860,5 +882,31 @@ mod tests {
         assert!(run(&changes, &[ch('x')]).is_empty());
         assert!(run(&changes, &[ch('p')]).is_empty());
         assert_eq!(run(&search(), &[ch('A')]), [Command::InsertChar('A')]);
+    }
+
+    #[test]
+    fn worktree_keys() {
+        let list = Mode::Worktrees {
+            items: Vec::new(),
+            selected: 0,
+        };
+        assert_eq!(run(&Mode::Filer, &[ch('W')]), [Command::ToggleWorktrees]);
+        assert_eq!(run(&list, &[ch('W')]), [Command::ToggleWorktrees]);
+        assert_eq!(run(&list, &[KeyCode::Enter]), [Command::Open]);
+        assert_eq!(run(&list, &[ch('R')]), [Command::Refresh]);
+        assert_eq!(run(&list, &[ch('2'), ch('j')]), [Command::MoveDown(2)]);
+        assert_eq!(run(&list, &[KeyCode::Down]), [Command::MoveDown(1)]);
+        assert_eq!(run(&list, &[ch('k')]), [Command::MoveUp(1)]);
+        assert_eq!(run(&list, &[KeyCode::Up]), [Command::MoveUp(1)]);
+        assert_eq!(run(&list, &[ch('g'), ch('g')]), [Command::GoTop]);
+        assert_eq!(run(&list, &[ch('G')]), [Command::GoBottom]);
+        // q and Esc close the list instead of quitting kura.
+        assert_eq!(run(&list, &[ch('q')]), [Command::Back]);
+        assert_eq!(run(&list, &[KeyCode::Esc]), [Command::Back]);
+        // File-list operations do not apply to the list.
+        assert!(run(&list, &[ch('x')]).is_empty());
+        assert!(run(&list, &[ch('A')]).is_empty());
+        assert!(run(&list, &[ch('e')]).is_empty());
+        assert_eq!(run(&search(), &[ch('W')]), [Command::InsertChar('W')]);
     }
 }
