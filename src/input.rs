@@ -2,9 +2,9 @@
 //!
 //! All key bindings live in this file: the per-mode tables below plus the
 //! few keys that need special handling in [`KeyState::translate`] (count
-//! prefix, `gg` / `G`, `q`, text input, dialogs).
+//! prefix, `gg` / `G`, `q`, text input, dialogs, `Ctrl` in the viewer).
 
-use crossterm::event::{self, Event, KeyCode};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{backend::Backend, Terminal};
 use std::ops::ControlFlow;
 use std::sync::mpsc;
@@ -62,14 +62,27 @@ const VISUAL_KEYS: Bindings = &[
 const VIEWER_KEYS: Bindings = &[
     (KeyCode::Char('j'), Command::MoveDown(1)),
     (KeyCode::Char('k'), Command::MoveUp(1)),
+    (KeyCode::PageDown, Command::PageDown(1)),
+    (KeyCode::PageUp, Command::PageUp(1)),
     (KeyCode::Char('m'), Command::ToggleMarkdown),
     (KeyCode::Enter, Command::Back),
+];
+
+/// `Ctrl` + key in the text and diff viewers. Elsewhere `Ctrl` is ignored
+/// and the key acts as typed without it.
+const VIEWER_CTRL_KEYS: Bindings = &[
+    (KeyCode::Char('f'), Command::PageDown(1)),
+    (KeyCode::Char('b'), Command::PageUp(1)),
+    (KeyCode::Char('d'), Command::HalfPageDown(1)),
+    (KeyCode::Char('u'), Command::HalfPageUp(1)),
 ];
 
 /// Diff viewer (`D`): like the text viewer, but `q` / `Esc` also close it.
 const DIFF_KEYS: Bindings = &[
     (KeyCode::Char('j'), Command::MoveDown(1)),
     (KeyCode::Char('k'), Command::MoveUp(1)),
+    (KeyCode::PageDown, Command::PageDown(1)),
+    (KeyCode::PageUp, Command::PageUp(1)),
     (KeyCode::Enter, Command::Back),
     (KeyCode::Esc, Command::Back),
     (KeyCode::Char('q'), Command::Back),
@@ -142,7 +155,11 @@ pub struct KeyState {
 
 impl KeyState {
     /// Turn a key press in the given mode into a command, if it completes one.
-    pub fn translate(&mut self, mode: &Mode, code: KeyCode) -> Option<Command> {
+    pub fn translate(&mut self, mode: &Mode, key: KeyEvent) -> Option<Command> {
+        let code = key.code;
+        let viewer_ctrl = matches!(mode, Mode::Viewer { .. })
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+            && lookup(VIEWER_CTRL_KEYS, code).is_some();
         // Text-input modes must receive every character (including 'q', 'g', 'G').
         let text_input = matches!(mode, Mode::Search { .. } | Mode::Rename { .. });
         // In dialogs 'q' never quits (the delete dialog treats it as cancel).
@@ -169,6 +186,11 @@ impl KeyState {
         }
         let count = if self.prefix > 0 { self.prefix } else { 1 };
         self.prefix = 0;
+
+        if viewer_ctrl {
+            self.last_key_g = false;
+            return lookup(VIEWER_CTRL_KEYS, code).map(|cmd| cmd.with_count(count));
+        }
 
         // Vim-style 'gg' (go to top) and 'G' (go to bottom), in every
         // non-text mode (they only have an effect in the list and viewer).
@@ -230,7 +252,7 @@ pub fn run_app<B: Backend<Error = io::Error> + Write>(
     };
     let mut keys = KeyState::default();
     for code in typeahead {
-        if handle_key(terminal, app, &mut keys, code)?.is_break() {
+        if handle_key(terminal, app, &mut keys, KeyEvent::from(code))?.is_break() {
             return Ok(());
         }
     }
@@ -255,7 +277,7 @@ pub fn run_app<B: Backend<Error = io::Error> + Write>(
             match event::read()? {
                 Event::Key(key) => {
                     dirty = true;
-                    if handle_key(terminal, app, &mut keys, key.code)?.is_break() {
+                    if handle_key(terminal, app, &mut keys, key)?.is_break() {
                         return Ok(());
                     }
                 }
@@ -281,11 +303,11 @@ fn handle_key<B: Backend<Error = io::Error> + Write>(
     terminal: &mut Terminal<B>,
     app: &mut App,
     keys: &mut KeyState,
-    code: KeyCode,
+    key: KeyEvent,
 ) -> io::Result<ControlFlow<()>> {
     // A status message stays until the next key press.
     app.message = None;
-    if let Some(cmd) = keys.translate(&app.mode, code) {
+    if let Some(cmd) = keys.translate(&app.mode, key) {
         if app.apply(cmd).is_break() {
             return Ok(ControlFlow::Break(()));
         }
@@ -399,6 +421,18 @@ mod tests {
     /// Translate a key sequence in a fixed mode, collecting the commands.
     fn run(mode: &Mode, keys: &[KeyCode]) -> Vec<Command> {
         let mut st = KeyState::default();
+        keys.iter()
+            .filter_map(|&k| st.translate(mode, KeyEvent::from(k)))
+            .collect()
+    }
+
+    fn ctrl(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+    }
+
+    /// Like [`run`], with modifiers.
+    fn run_keys(mode: &Mode, keys: &[KeyEvent]) -> Vec<Command> {
+        let mut st = KeyState::default();
         keys.iter().filter_map(|&k| st.translate(mode, k)).collect()
     }
 
@@ -426,6 +460,7 @@ mod tests {
         Mode::Viewer {
             doc: TextDoc::plain(String::new(), ""),
             offset: 0,
+            at_end: false,
             diff: false,
         }
     }
@@ -434,6 +469,7 @@ mod tests {
         Mode::Viewer {
             doc: TextDoc::plain(String::new(), ""),
             offset: 0,
+            at_end: false,
             diff: true,
         }
     }
@@ -690,6 +726,43 @@ mod tests {
         assert_eq!(run(&d, &[ch('D')]), []);
         // The plain text viewer keeps its keys.
         assert_eq!(run(&viewer(), &[ch('q')]), [Command::Quit]);
+    }
+
+    #[test]
+    fn viewer_page_keys() {
+        for mode in [viewer(), diff_viewer()] {
+            assert_eq!(
+                run(&mode, &[KeyCode::PageDown, KeyCode::PageUp]),
+                [Command::PageDown(1), Command::PageUp(1)]
+            );
+            assert_eq!(
+                run_keys(&mode, &[ctrl('f'), ctrl('b'), ctrl('d'), ctrl('u')]),
+                [
+                    Command::PageDown(1),
+                    Command::PageUp(1),
+                    Command::HalfPageDown(1),
+                    Command::HalfPageUp(1),
+                ]
+            );
+            // Without Ctrl the letters do nothing.
+            assert!(run(&mode, &[ch('f'), ch('b'), ch('d'), ch('u')]).is_empty());
+        }
+        // A count scrolls that many pages.
+        assert_eq!(
+            run_keys(&viewer(), &[KeyEvent::from(ch('3')), ctrl('d')]),
+            [Command::HalfPageDown(3)]
+        );
+        assert_eq!(
+            run(&viewer(), &[ch('2'), KeyCode::PageDown]),
+            [Command::PageDown(2)]
+        );
+        // Not in the file list or the preview (out of scope there).
+        for mode in [Mode::Filer, Mode::Preview] {
+            assert!(run(&mode, &[KeyCode::PageDown, KeyCode::PageUp]).is_empty());
+            assert!(run_keys(&mode, &[ctrl('f'), ctrl('b'), ctrl('d'), ctrl('u')]).is_empty());
+        }
+        // Other Ctrl keys still act as the plain key.
+        assert_eq!(run_keys(&viewer(), &[ctrl('j')]), [Command::MoveDown(1)]);
     }
 
     #[test]

@@ -709,6 +709,7 @@ impl App {
                 self.mode = Mode::Viewer {
                     doc: TextDoc::for_file(title, &path, &content),
                     offset: 0,
+                    at_end: false,
                     diff: false,
                 };
             }

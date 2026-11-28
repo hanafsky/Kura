@@ -56,13 +56,20 @@ pub fn ui(f: &mut Frame, app: &mut App) {
         (chunks[1], None)
     };
 
-    if let Mode::Viewer { doc, offset, .. } = &mut app.mode {
+    if let Mode::Viewer {
+        doc,
+        offset,
+        at_end,
+        ..
+    } = &mut app.mode
+    {
         let block = Block::default()
             .borders(Borders::ALL)
             .title(doc.title.as_str());
         // The offset is limited to the current size here, so that it also
-        // follows a terminal resize.
-        let (size, clamped) = text_view::draw(f, content_area, block, doc, *offset);
+        // follows a terminal resize; at the end it stays at the end.
+        let wanted = if *at_end { usize::MAX } else { *offset };
+        let (size, clamped) = text_view::draw(f, content_area, block, doc, wanted);
         *offset = clamped;
         app.viewer_size = Some(size);
     } else {
@@ -531,6 +538,75 @@ mod tests {
             panic!("not in the viewer");
         };
         assert_eq!(*offset, text_view::max_offset(doc, 58, 4));
+    }
+
+    /// The viewer on a 24-column screen with the last row at the bottom,
+    /// for the resize tests below.
+    fn viewer_on_long_text(rows: usize) -> App {
+        let tmp = tempfile::tempdir().unwrap();
+        let long = "あいうえおかきくけこ".repeat(6);
+        let text = format!("{}LAST\n", format!("{long}\n").repeat(rows));
+        std::fs::write(tmp.path().join("t.txt"), text).unwrap();
+        let mut app = App::with_dir(
+            ratatui_image::picker::Picker::halfblocks(),
+            tmp.path().to_path_buf(),
+        )
+        .unwrap();
+        let _ = app.apply(crate::command::Command::Open);
+        app
+    }
+
+    #[test]
+    fn viewer_stays_at_the_end_when_the_terminal_gets_narrower() {
+        use crate::command::Command;
+        // `G` on a wide screen, then narrower: more rows, still at the end.
+        let mut app = viewer_on_long_text(3);
+        full_screen(&mut app, 60, 8);
+        let _ = app.apply(Command::GoBottom);
+        assert!(full_screen(&mut app, 60, 8)[5].contains("LAST"));
+        let rows = full_screen(&mut app, 24, 8);
+        assert!(rows[5].contains("LAST"), "{rows:#?}");
+        // And wider again.
+        assert!(full_screen(&mut app, 60, 8)[5].contains("LAST"));
+
+        // Reaching the end with `j` (or a page down) does the same.
+        let mut app = viewer_on_long_text(3);
+        full_screen(&mut app, 60, 8);
+        let Mode::Viewer { doc, .. } = &app.mode else {
+            panic!("not in the viewer");
+        };
+        let max = text_view::max_offset(doc, 58, 4);
+        for _ in 0..max - 1 {
+            let _ = app.apply(Command::MoveDown(1));
+        }
+        assert!(!full_screen(&mut app, 60, 8)[5].contains("LAST"));
+        let _ = app.apply(Command::MoveDown(1));
+        assert!(full_screen(&mut app, 60, 8)[5].contains("LAST"));
+        let rows = full_screen(&mut app, 24, 8);
+        assert!(rows[5].contains("LAST"), "{rows:#?}");
+        let _ = app.apply(Command::PageUp(1));
+        full_screen(&mut app, 60, 8);
+        let _ = app.apply(Command::PageDown(1));
+        assert!(full_screen(&mut app, 60, 8)[5].contains("LAST"));
+        assert!(full_screen(&mut app, 24, 8)[5].contains("LAST"));
+
+        // After `k` it no longer follows the end.
+        let mut app = viewer_on_long_text(3);
+        full_screen(&mut app, 60, 8);
+        let _ = app.apply(Command::GoBottom);
+        full_screen(&mut app, 60, 8);
+        let _ = app.apply(Command::MoveUp(1));
+        let shows_last = |rows: Vec<String>| rows.iter().any(|r| r.contains("LAST"));
+        assert!(!shows_last(full_screen(&mut app, 60, 8)));
+        let Mode::Viewer { offset, .. } = &app.mode else {
+            panic!("not in the viewer");
+        };
+        let before = *offset;
+        assert!(!shows_last(full_screen(&mut app, 24, 8)));
+        let Mode::Viewer { offset, .. } = &app.mode else {
+            panic!("not in the viewer");
+        };
+        assert_eq!(*offset, before);
     }
 
     /// The right half of the screen (the preview, with the left pane active).
