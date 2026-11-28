@@ -1,0 +1,46 @@
+# Herdr plugin manifest for kura (https://herdr.dev/docs/plugins/).
+#
+# Install:  herdr plugin install hanafsky/Kura
+# Bind:     [[keys.command]] key = "prefix+f", type = "plugin_action", command = "kura.open"
+#
+# The plugin does not build kura: install the `kura` binary first (GitHub
+# Releases or `cargo install`) so that it is on the PATH of the herdr server.
+
+id = "kura"
+name = "kura"
+version = "0.4.1"
+min_herdr_version = "0.9.5"
+description = "Two-pane TUI file manager, opened beside your agents in the focused pane's directory."
+platforms = ["linux", "macos"]
+
+# Both actions open a pane below in the focused pane's working directory.
+# The launcher runs with the plugin directory as its working directory.
+[[actions]]
+id = "open"
+title = "Open kura (split)"
+contexts = ["workspace"]
+command = ["sh", "herdr/open.sh", "split"]
+
+[[actions]]
+id = "open-popup"
+title = "Open kura (popup)"
+contexts = ["workspace"]
+command = ["sh", "herdr/open.sh", "popup"]
+
+# Pane commands run in the directory passed by the launcher (`--cwd`), so they
+# must not use paths relative to the plugin directory: `kura` is found on PATH.
+[[panes]]
+id = "split"
+title = "kura"
+placement = "split"
+command = ["kura"]
+
+# A popup has no pane ID and receives every key, including Esc and the herdr
+# prefix. Quit kura (q) to close it.
+[[panes]]
+id = "popup"
+title = "kura"
+placement = "popup"
+width = "90%"
+height = "90%"
+command = ["kura"]

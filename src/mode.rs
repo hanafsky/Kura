@@ -58,4 +58,15 @@ pub enum Mode {
         items: Vec<PathBuf>,
         selected: usize,
     },
+    /// Choose the agent pane to send `@path` references to (`Y` in herdr
+    /// with several agents).
+    SendTarget {
+        targets: Vec<crate::ade::Agent>,
+        selected: usize,
+        /// The entries to send.
+        paths: Vec<PathBuf>,
+        /// Where the dialog was opened (the file list or the agent
+        /// changes list), restored when it closes.
+        back: Box<Mode>,
+    },
 }

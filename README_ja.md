@@ -115,6 +115,7 @@ sudo apt install ffmpeg
 - `p`: コピーしたエントリを現在のディレクトリに貼り付けます。
 - `Y`: カーソル行またはマークされたすべてのエントリを、Claude Code などのコーディングエージェント向けの `@path` 形式でシステムのクリップボードにコピーします（例: `@src/main.rs @"docs/my notes.md"`）。パスは kura を起動したディレクトリからの相対パスで（その外にあるパスは絶対パス）、空白で区切られます。スペースを含むパスは `@"..."` のように引用符で囲みます。
   書き込みは OSC 52 エスケープシーケンスで行います（tmux・herdr・ssh 越しでも届きます）。kura からは端末が OSC 52 を受け付けたか判別できないため、`pbcopy`（macOS）、`wl-copy` / `xclip`（Linux）、`clip.exe`（WSL）にも書き込みます。ただし ssh 越し（`SSH_CONNECTION` / `SSH_TTY` / `SSH_CLIENT` のいずれかが設定されている）では OSC 52 だけを使います。tmux 内では `~/.tmux.conf` に `set -g set-clipboard on` を設定してください。`KURA_CLIPBOARD` には `auto`（既定。上記の動作）・`osc52`（OSC 52 のみ）・`native`（ネイティブのツールのみ）を指定できます。`KURA_AT_PATH=absolute` で常に絶対パスにします。
+  [herdr](https://herdr.dev) の中（`HERDR_ENV=1` かつ `HERDR_SOCKET_PATH` あり）では、クリップボードの代わりに herdr のソケット経由でエージェントのペインへ入力します。末尾に空白を付け、Enter は押しません。送り先は kura と同じワークスペースにある、kura 自身以外のエージェントのペインです。複数あるときはダイアログで選びます（`j`/`k`、`Enter`: 送る、`Esc` / `q`: 取り消し）。パスは送り先エージェントの作業ディレクトリからの相対パスになります。エージェントのペインが無ければ上記のとおりクリップボードにコピーします。Herdr.app（herdr-core、`hc`）の中ではクリップボードを使います。
 - `M`: 現在のペインで、git の変更があるエントリ（とそれを含むディレクトリ）だけを表示するかを切り替えます。
 - `.`: 現在のペインで隠しファイル（`.` で始まる名前）を表示するかを切り替えます（既定は表示）。隠している間はペインのタイトルに `[no hidden]` と表示します。
 - `i`: 現在のペインで、`.gitignore` などで git に無視されるエントリを隠すかを切り替えます（git リポジトリ内でのみ有効）。有効な間はペインのタイトルに `[no ignored]` と表示します。判定はディレクトリの読み込み時に取得した git status（`--ignored`）を使い、切り替えのたびに git を起動しません。無視されたディレクトリ（`target/` など）の中に入ったときは、中身がすべて無視対象なので何も隠しません。`.git` は無視対象ではないため `i` では隠れません（`.` で隠せます）。
@@ -228,3 +229,46 @@ end
 - 一覧を開いている間はログを監視するので（`KURA_WATCH=off` のときを除く。そのときは `R`）、新しい編集は自動で一覧に加わります。10 秒以内に変更されたファイルと、kura の起動後に変更されたファイルは、ファイル一覧と同じように強調されます。
 - 存在しなくなったファイルは一覧に残り、薄い色で `(deleted)` と表示されます。`Enter` を押すと、そのファイルがあったディレクトリへ移動します。
 - 記録されるのはファイル編集ツールによる変更だけです。エージェントが実行したシェルコマンド（`mv`・`rm`・`sed -i`・フォーマッタなど）による変更は記録されません。
+
+## Herdr プラグイン
+
+kura を [Herdr](https://herdr.dev/)（コーディングエージェント向けの TUI ターミナルワークスペース）のペインとして、エージェントの隣に、フォーカス中のペインのディレクトリで開けます。
+
+先に `kura` 本体を入れてください（[インストール](#インストール)）。プラグインは kura をビルドせず、Herdr サーバの `PATH` にある `kura` を起動します（Cargo で入れた場合は `~/.cargo/bin` が `PATH` に入っていることを確認してください）。そのうえでプラグインを入れます（Herdr 0.9.5 以降）。
+
+```bash
+herdr plugin install hanafsky/Kura
+```
+
+アクションは 2 つあります。
+
+| アクション | kura の開き方 |
+| --- | --- |
+| `kura.open` | フォーカス中のペインの右に分割して開く |
+| `kura.open-popup` | レイアウトの上にポップアップ（端末の 90%）で開く |
+
+`~/.config/herdr/config.toml` でキーに割り当てます。たとえば `prefix+f` なら次のとおりです。
+
+```toml
+[[keys.command]]
+key = "prefix+f"
+type = "plugin_action"
+command = "kura.open"
+description = "open kura"
+
+[[keys.command]]
+key = "prefix+shift+f"
+type = "plugin_action"
+command = "kura.open-popup"
+description = "open kura (popup)"
+```
+
+シェルから `herdr plugin action invoke kura.open` でも開けます。kura を終了（`q`）するとペインも閉じます。
+
+ポップアップの注意点：
+
+- ポップアップは `Esc` や Herdr のプレフィックスを含むすべてのキーを受け取るため、開いている間はペインを移動できません。`Esc` では閉じないので、`q` で kura を終了してください。
+- ポップアップにはペイン ID がなく（`HERDR_PANE_ID` も渡りません）、レイアウトにも含まれません。エージェントの隣に置いておきたいときは分割を使ってください。
+- 他の Herdr のポップアップやモーダル（Settings、Copy mode）が開いている間は開きません。
+
+何も開かないときは `herdr plugin log list --plugin kura` を確認してください。手元のチェックアウトを試すときは、`install` の代わりに `herdr plugin link /path/to/Kura` を使います。

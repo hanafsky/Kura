@@ -18,8 +18,16 @@ pub fn toggle_mark(pane: &mut Pane) {
 }
 
 /// Paths to act on: the marked entries (in list order), or the entry under
-/// the cursor when nothing is marked.
+/// the cursor when nothing is marked. In the agent changes list (`A`), the
+/// change under its cursor.
 pub fn target_paths(app: &App) -> Vec<PathBuf> {
+    if let Mode::Changes { .. } = app.mode {
+        return app
+            .selected_change()
+            .map(Path::to_path_buf)
+            .into_iter()
+            .collect();
+    }
     let pane = app.current_pane();
     if pane.marked.is_empty() {
         return pane.selected_path().into_iter().collect();
@@ -29,6 +37,14 @@ pub fn target_paths(app: &App) -> Vec<PathBuf> {
         .map(|e| e.path())
         .filter(|p| pane.marked.contains(p))
         .collect()
+}
+
+/// After the [`target_paths`] were copied or sent: clear the marks they
+/// came from (the agent changes list has none, so the pane's stay).
+pub fn clear_sent_marks(app: &mut App) {
+    if !matches!(app.mode, Mode::Changes { .. }) {
+        app.current_pane_mut().marked.clear();
+    }
 }
 
 /// Rename the entry under the cursor to `new_name` (in the same directory),

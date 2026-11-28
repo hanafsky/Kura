@@ -274,14 +274,6 @@ impl App {
         }
     }
 
-    /// `Y` in the list: copy the file under the cursor as an `@path`, the
-    /// same way as from the file list.
-    pub fn copy_change_at_path(&mut self) {
-        if let Some(path) = self.selected_change().map(Path::to_path_buf) {
-            crate::clipboard::copy_paths_as_at(self, &[path]);
-        }
-    }
-
     /// The log's directory, watched while the list is open (if it exists).
     pub fn agent_log_watch_dir(&self) -> Option<PathBuf> {
         if !matches!(self.mode, Mode::Changes { .. }) {
@@ -586,6 +578,10 @@ mod tests {
     #[test]
     fn e_edits_and_y_copies_the_file_under_the_cursor() {
         let (proj, _state, mut app) = setup(&["b.md", "src/a.rs"]);
+        // Marks in the file list are neither copied nor cleared.
+        app.current_pane_mut()
+            .marked
+            .insert(proj.path().join("b.md"));
         let _ = app.apply(Command::ToggleAgentChanges);
         let _ = app.apply(Command::OpenEditor);
         assert_eq!(app.pending_edit, Some(proj.path().join("src/a.rs")));
@@ -593,6 +589,73 @@ mod tests {
         let copied = crate::clipboard::LAST_COPY.with(|c| c.borrow_mut().take());
         assert_eq!(copied.as_deref(), Some("@src/a.rs"));
         assert!(matches!(app.mode, Mode::Changes { .. }));
+        assert_eq!(app.current_pane().marked_count(), 1);
+    }
+
+    /// `Y` in the list goes through the same herdr sending as the file list.
+    #[cfg(unix)]
+    mod herdr {
+        use super::*;
+        use crate::ade::tests::FakeHerdr;
+        use crate::ade::Ade;
+        use serde_json::{json, Value};
+
+        fn sent(fake: &FakeHerdr) -> Vec<Value> {
+            fake.requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|r| r["method"] == "pane.send_text")
+                .map(|r| r["params"]["text"].clone())
+                .collect()
+        }
+
+        fn agent(pane: &str, cwd: &Path) -> Value {
+            json!({"pane_id": pane, "workspace_id": "w1", "tab_id": "w1:t1",
+                   "agent": "claude", "cwd": cwd})
+        }
+
+        #[test]
+        fn y_sends_the_change_to_the_agent() {
+            let (proj, _state, mut app) = setup(&["b.md", "src/a.rs"]);
+            let fake = FakeHerdr::with_agents(json!([agent("w1:p2", proj.path())]));
+            app.ade = Ade::Herdr(fake.env());
+            app.current_pane_mut()
+                .marked
+                .insert(proj.path().join("b.md"));
+            let _ = app.apply(Command::ToggleAgentChanges);
+            let _ = app.apply(Command::CopyAtPaths);
+            assert_eq!(sent(&fake), [json!("@src/a.rs ")]);
+            assert!(matches!(app.mode, Mode::Changes { .. }));
+            assert_eq!(app.current_pane().marked_count(), 1);
+        }
+
+        #[test]
+        fn the_target_dialog_returns_to_the_list() {
+            let (proj, _state, mut app) = setup(&["b.md", "src/a.rs"]);
+            let fake = FakeHerdr::with_agents(json!([
+                agent("w1:p2", proj.path()),
+                agent("w1:p3", proj.path()),
+            ]));
+            app.ade = Ade::Herdr(fake.env());
+            let _ = app.apply(Command::ToggleAgentChanges);
+            let _ = app.apply(Command::MoveDown(1)); // b.md
+            let _ = app.apply(Command::CopyAtPaths);
+            assert!(matches!(app.mode, Mode::SendTarget { .. }));
+            // Cancelled: back in the list, on the same file.
+            let _ = app.apply(Command::Back);
+            assert_eq!(
+                app.selected_change(),
+                Some(proj.path().join("b.md").as_path())
+            );
+            let _ = app.apply(Command::CopyAtPaths);
+            let _ = app.apply(Command::SendConfirm);
+            assert_eq!(sent(&fake), [json!("@b.md ")]);
+            assert_eq!(
+                app.selected_change(),
+                Some(proj.path().join("b.md").as_path())
+            );
+        }
     }
 
     #[test]

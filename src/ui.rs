@@ -166,6 +166,13 @@ pub fn ui(f: &mut Frame, app: &mut App) {
         f.render_widget(list, popup);
     }
 
+    if let Mode::SendTarget {
+        targets, selected, ..
+    } = &app.mode
+    {
+        draw_send_target(f, targets, *selected);
+    }
+
     draw_status_line(f, chunks[2], app);
 
     if let Some(footer) = footer_area {
@@ -181,6 +188,32 @@ pub fn ui(f: &mut Frame, app: &mut App) {
         let paragraph = Paragraph::new(prompt);
         f.render_widget(paragraph, footer);
     }
+}
+
+/// Agent choice for `Y` in herdr: one row per agent pane.
+fn draw_send_target(f: &mut Frame, targets: &[crate::ade::Agent], selected: usize) {
+    let area = f.area();
+    let mut popup = centered_rect(50, 20, area);
+    popup.height = (targets.len() as u16).saturating_add(2).min(area.height);
+    popup.y = area.y + (area.height - popup.height) / 2;
+    let block = Block::default()
+        .title(" Send to (Enter: send, Esc/q: cancel) ")
+        .borders(Borders::ALL);
+    let items: Vec<ListItem> = targets
+        .iter()
+        .enumerate()
+        .map(|(i, agent)| {
+            let style = if i == selected {
+                Style::default().add_modifier(Modifier::REVERSED)
+            } else {
+                Style::default()
+            };
+            ListItem::new(Line::from(Span::styled(agent.label(), style)))
+        })
+        .collect();
+    let mut state = ListState::default().with_selected(Some(selected));
+    f.render_widget(Clear, popup);
+    f.render_stateful_widget(List::new(items).block(block), popup, &mut state);
 }
 
 /// Collision dialog shown while pasting: names the colliding entry and

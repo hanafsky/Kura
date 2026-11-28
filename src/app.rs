@@ -332,6 +332,8 @@ pub struct App {
     /// that scrolling can stop at the last wrapped row (`G`, `j`). `None`
     /// before the viewer was first drawn.
     pub viewer_size: Option<(u16, u16)>,
+    /// The agent terminal kura runs in (`Y` sends `@path` to its agents).
+    pub ade: crate::ade::Ade,
     /// Log of the files the coding agent changed (`A`); `None` if no
     /// location could be worked out.
     pub agent_log: Option<PathBuf>,
@@ -367,6 +369,7 @@ impl App {
             session_start: SystemTime::now(),
             text_preview: None,
             viewer_size: None,
+            ade: crate::ade::Ade::None,
             agent_log: crate::agent_changes::log_path_from_env(),
         })
     }
