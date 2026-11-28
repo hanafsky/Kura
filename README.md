@@ -115,6 +115,7 @@ sudo apt install ffmpeg
 - `p`: Paste copied entries into the current directory.
 - `Y`: Copy the current entry or all marked entries to the system clipboard as `@path` references for coding agents such as Claude Code (e.g. `@src/main.rs @"docs/my notes.md"`). Paths are relative to the directory kura was started in (paths outside it stay absolute), separated by spaces; a path containing spaces is quoted as `@"..."`.
   The text is sent with the OSC 52 escape sequence (so it works through tmux, herdr, or ssh). Because kura cannot tell whether the terminal accepted OSC 52, it is also written with `pbcopy` (macOS), `wl-copy` / `xclip` (Linux), or `clip.exe` (WSL), unless kura runs over ssh (`SSH_CONNECTION` / `SSH_TTY` / `SSH_CLIENT` set), where only OSC 52 is used. Inside tmux, enable `set -g set-clipboard on` in `~/.tmux.conf`. `KURA_CLIPBOARD` accepts `auto` (default, as above), `osc52` (OSC 52 only), or `native` (native tools only); set `KURA_AT_PATH=absolute` to always copy absolute paths.
+  Inside [herdr](https://herdr.dev) (`HERDR_ENV=1` with `HERDR_SOCKET_PATH`), `Y` instead types the references into an agent pane through herdr's socket, followed by a space and without pressing Enter. Targets are the agents in kura's workspace other than kura's own pane; with several, a dialog asks which one (`j`/`k`, `Enter`: send, `Esc` / `q`: cancel). Paths are relative to that agent's working directory. Without an agent pane, `Y` copies to the clipboard as above. In Herdr.app (herdr-core, `hc`) `Y` uses the clipboard.
 - `M`: Toggle showing only entries with git changes (and directories containing them) in the current pane.
 - `.`: Toggle showing hidden entries (names starting with `.`) in the current pane (shown by default). While they are hidden the pane title shows `[no hidden]`.
 - `i`: Toggle hiding entries ignored by git (`.gitignore` etc.) in the current pane (only inside a git repository). While active the pane title shows `[no ignored]`. It uses the git status (`--ignored`) read when the directory was loaded, so toggling does not run git. Inside an ignored directory (such as `target/`) nothing is hidden, since everything there is ignored. `.git` is not an ignored entry, so `i` does not hide it (`.` does).
@@ -216,3 +217,46 @@ Relative paths are resolved against the sender's working directory. The message 
 3. the most recently started kura that is still running.
 
 Each kura listens on `$XDG_RUNTIME_DIR/kura/kura-<pid>.sock` (or `<temp dir>/kura-<uid>/kura-<pid>.sock` when `XDG_RUNTIME_DIR` is unset); the socket is removed on exit. Views (text viewer, preview, sort menu) are closed first; while a prompt or dialog is open (search, rename, delete confirmation) the command is refused. kura answers after carrying out the command: when it failed or was refused, `kura msg` prints the reason and exits with a non-zero status. A command that kura cannot take within 3 seconds (e.g. while the editor started with `e` is open) is dropped and reported as timed out. The protocol is one JSON object per line (`{"cmd":"reveal","path":"/abs/path"}`), answered with `{"ok":true}` or `{"ok":false,"error":"..."}`. To open a directory named `msg`, write `kura ./msg`.
+
+## Herdr plugin
+
+kura can be opened as a pane of [Herdr](https://herdr.dev/) (the TUI terminal workspace manager for coding agents), next to your agents, in the directory of the focused pane.
+
+Install the `kura` binary first ([Installation](#installation)). The plugin does not build kura; it runs `kura` from the `PATH` of the Herdr server (if you installed with Cargo, make sure `~/.cargo/bin` is on it). Then install the plugin (Herdr 0.9.5 or later):
+
+```bash
+herdr plugin install hanafsky/Kura
+```
+
+It provides two actions:
+
+| Action | Opens kura |
+| --- | --- |
+| `kura.open` | in a split to the right of the focused pane |
+| `kura.open-popup` | in a popup (90% of the terminal) over the layout |
+
+Bind them in `~/.config/herdr/config.toml`, for example to `prefix+f`:
+
+```toml
+[[keys.command]]
+key = "prefix+f"
+type = "plugin_action"
+command = "kura.open"
+description = "open kura"
+
+[[keys.command]]
+key = "prefix+shift+f"
+type = "plugin_action"
+command = "kura.open-popup"
+description = "open kura (popup)"
+```
+
+You can also run them from the shell with `herdr plugin action invoke kura.open`. Quitting kura (`q`) closes its pane.
+
+Notes on the popup:
+
+- A popup receives every key, including `Esc` and the Herdr prefix, so you cannot switch panes while it is open. `Esc` does not close it; quit kura with `q`.
+- A popup has no pane ID (no `HERDR_PANE_ID`) and is not part of the layout. Use the split when you want kura to stay open beside your agents.
+- It does not open while another Herdr popup or modal (Settings, Copy mode) is open.
+
+If nothing opens, check `herdr plugin log list --plugin kura`. To try a local checkout, use `herdr plugin link /path/to/Kura` instead of `install`.

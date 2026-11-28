@@ -61,9 +61,12 @@ pub enum Command {
     Yank,
     /// Paste the clipboard into the current directory.
     Paste,
-    /// Copy the marked entries (or the one under the cursor) to the system
-    /// clipboard as `@path` references for coding agents.
+    /// Hand the marked entries (or the one under the cursor) to a coding
+    /// agent as `@path` references: typed into an agent pane in herdr,
+    /// copied to the system clipboard elsewhere.
     CopyAtPaths,
+    /// Send to the agent highlighted in the target dialog.
+    SendConfirm,
     /// Ask for confirmation to delete the marked entries (or the one under the cursor).
     Delete(DeleteKind),
     /// Confirm the pending deletion.
@@ -202,7 +205,8 @@ impl App {
             }
             Command::Yank if filer => copy_selection(self),
             Command::Paste if filer => paste(self),
-            Command::CopyAtPaths if filer => crate::clipboard::copy_at_paths(self),
+            Command::CopyAtPaths if filer => crate::ade::send_at_paths(self),
+            Command::SendConfirm => crate::ade::confirm_send_target(self),
             Command::Delete(kind) if filer => {
                 let items = target_paths(self);
                 if !items.is_empty() {
@@ -349,7 +353,8 @@ impl App {
             Mode::Search { .. }
             | Mode::Rename { .. }
             | Mode::ConfirmDelete { .. }
-            | Mode::PasteConflict { .. } => {
+            | Mode::PasteConflict { .. }
+            | Mode::SendTarget { .. } => {
                 self.notify_error(format!("Cannot {what}: finish the current prompt first"));
                 false
             }
@@ -432,6 +437,18 @@ impl App {
                     });
             }
             Mode::Preview => self.preview_step(n, down),
+            Mode::SendTarget {
+                selected, targets, ..
+            } => {
+                let len = targets.len().max(1);
+                for _ in 0..n {
+                    *selected = if down {
+                        (*selected + 1) % len
+                    } else {
+                        (*selected + len - 1) % len
+                    };
+                }
+            }
             Mode::Sort { selected } => {
                 let len = SORT_MENU_ROWS;
                 for _ in 0..n {
@@ -1484,6 +1501,199 @@ mod tests {
         let _ = app.apply(Command::SortMenu);
         let _ = app.apply(Command::CopyAtPaths);
         assert_eq!(last_copy(), None);
+    }
+
+    #[test]
+    fn copy_at_paths_in_herdr_core_uses_the_clipboard() {
+        let tmp = abcd();
+        let mut app = app_in(tmp.path());
+        app.ade = crate::ade::Ade::HerdrCore {
+            terminal_id: "t7".into(),
+        };
+        let _ = app.apply(Command::CopyAtPaths);
+        assert_eq!(last_copy().as_deref(), Some("@a"));
+    }
+
+    #[cfg(unix)]
+    mod herdr {
+        use super::*;
+        use crate::ade::tests::FakeHerdr;
+        use crate::ade::Ade;
+        use serde_json::{json, Value};
+
+        fn sent_texts(fake: &FakeHerdr) -> Vec<Value> {
+            fake.requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|r| r["method"] == "pane.send_text")
+                .map(|r| r["params"].clone())
+                .collect()
+        }
+
+        fn agent(pane: &str, cwd: &Path) -> Value {
+            json!({"pane_id": pane, "workspace_id": "w1", "tab_id": "w1:t1",
+                   "agent": "claude", "cwd": cwd})
+        }
+
+        #[test]
+        fn sends_marked_entries_to_the_only_agent() {
+            let tmp = abcd();
+            let fake = FakeHerdr::with_agents(json!([
+                // kura's own pane is never a target.
+                agent("w1:p1", tmp.path()),
+                agent("w1:p2", tmp.path()),
+            ]));
+            let mut app = app_in(tmp.path());
+            app.ade = Ade::Herdr(fake.env());
+            let _ = app.apply(Command::MoveDown(1));
+            let _ = app.apply(Command::ToggleMark);
+            let _ = app.apply(Command::MoveDown(1));
+            let _ = app.apply(Command::ToggleMark);
+            let _ = app.apply(Command::CopyAtPaths);
+            assert_eq!(
+                sent_texts(&fake),
+                [json!({"pane_id": "w1:p2", "text": "@b @c "})]
+            );
+            assert!(marked(&app).is_empty());
+            assert_eq!(
+                app.message.as_ref().unwrap().text,
+                "Sent 2 path(s) to claude"
+            );
+            assert_eq!(last_copy(), None);
+        }
+
+        #[test]
+        fn paths_are_relative_to_the_agent_cwd() {
+            let tmp = abcd();
+            fs::create_dir(tmp.path().join("sub")).unwrap();
+            let fake = FakeHerdr::with_agents(json!([agent("w1:p2", &tmp.path().join("sub"))]));
+            let mut app = app_in(tmp.path());
+            app.ade = Ade::Herdr(fake.env());
+            while selected_name(&app) != "a" {
+                let _ = app.apply(Command::MoveDown(1));
+            }
+            let _ = app.apply(Command::CopyAtPaths);
+            // `a` is outside the agent's directory, so it stays absolute.
+            let text = sent_texts(&fake)[0]["text"].as_str().unwrap().to_string();
+            assert_eq!(text, format!("@{} ", tmp.path().join("a").display()));
+        }
+
+        #[test]
+        fn several_agents_open_the_target_dialog() {
+            let tmp = abcd();
+            let fake = FakeHerdr::with_agents(json!([
+                agent("w1:p2", tmp.path()),
+                agent("w1:p3", tmp.path()),
+            ]));
+            let mut app = app_in(tmp.path());
+            app.ade = Ade::Herdr(fake.env());
+            let _ = app.apply(Command::CopyAtPaths);
+            assert!(matches!(app.mode, Mode::SendTarget { selected: 0, .. }));
+            assert!(sent_texts(&fake).is_empty());
+            // Wraps around like the sort menu.
+            let _ = app.apply(Command::MoveDown(3));
+            assert!(matches!(app.mode, Mode::SendTarget { selected: 1, .. }));
+            let _ = app.apply(Command::SendConfirm);
+            assert!(matches!(app.mode, Mode::Filer));
+            assert_eq!(
+                sent_texts(&fake),
+                [json!({"pane_id": "w1:p3", "text": "@a "})]
+            );
+        }
+
+        #[test]
+        fn target_dialog_cancel_sends_nothing() {
+            let tmp = abcd();
+            let fake = FakeHerdr::with_agents(json!([
+                agent("w1:p2", tmp.path()),
+                agent("w1:p3", tmp.path()),
+            ]));
+            let mut app = app_in(tmp.path());
+            app.ade = Ade::Herdr(fake.env());
+            let _ = app.apply(Command::CopyAtPaths);
+            let _ = app.apply(Command::Back);
+            assert!(matches!(app.mode, Mode::Filer));
+            let _ = app.apply(Command::SendConfirm);
+            assert!(sent_texts(&fake).is_empty());
+        }
+
+        #[test]
+        fn q_in_the_target_dialog_cancels_without_quitting() {
+            use crossterm::event::{KeyCode, KeyEvent};
+            let tmp = abcd();
+            let fake = FakeHerdr::with_agents(json!([
+                agent("w1:p2", tmp.path()),
+                agent("w1:p3", tmp.path()),
+            ]));
+            let mut app = app_in(tmp.path());
+            app.ade = Ade::Herdr(fake.env());
+            let _ = app.apply(Command::ToggleMark);
+            let _ = app.apply(Command::CopyAtPaths);
+            let cmd = crate::input::KeyState::default()
+                .translate(&app.mode, KeyEvent::from(KeyCode::Char('q')))
+                .unwrap();
+            assert!(app.apply(cmd).is_continue());
+            assert!(matches!(app.mode, Mode::Filer));
+            assert!(sent_texts(&fake).is_empty());
+            assert_eq!(marked(&app), [0]);
+        }
+
+        #[test]
+        fn no_agent_falls_back_to_the_clipboard() {
+            let tmp = abcd();
+            let fake = FakeHerdr::with_agents(json!([agent("w1:p1", tmp.path())]));
+            let mut app = app_in(tmp.path());
+            app.ade = Ade::Herdr(fake.env());
+            let _ = app.apply(Command::CopyAtPaths);
+            assert_eq!(last_copy().as_deref(), Some("@a"));
+            assert_eq!(
+                app.message.as_ref().unwrap().text,
+                "No agent pane found; copied 1 path(s)"
+            );
+        }
+
+        #[test]
+        fn unreachable_herdr_reports_an_error() {
+            let tmp = abcd();
+            let mut app = app_in(tmp.path());
+            let _ = app.apply(Command::ToggleMark);
+            app.ade = Ade::Herdr(crate::ade::HerdrEnv {
+                socket: tmp.path().join("missing.sock"),
+                pane_id: None,
+                workspace_id: None,
+                tab_id: None,
+            });
+            let _ = app.apply(Command::CopyAtPaths);
+            let msg = app.message.as_ref().unwrap();
+            assert_eq!(msg.level, MessageLevel::Error);
+            assert!(msg.text.starts_with("Send failed: herdr: "), "{}", msg.text);
+            assert_eq!(last_copy(), None);
+            // The marks stay for another try.
+            assert_eq!(marked(&app), [0]);
+        }
+
+        #[test]
+        fn failed_send_keeps_the_marks() {
+            let tmp = abcd();
+            let fake = FakeHerdr::start(|req| {
+                let id = req["id"].clone();
+                Some(match req["method"].as_str() {
+                    Some("agent.list") => json!({"id": id, "result": {"type": "agent_list",
+                        "agents": [{"pane_id": "w1:p2", "workspace_id": "w1", "tab_id": "w1:t1"}]}}),
+                    _ => json!({"id": id, "error": {"code": "not_found", "message": "pane gone"}}),
+                })
+            });
+            let mut app = app_in(tmp.path());
+            app.ade = Ade::Herdr(fake.env());
+            let _ = app.apply(Command::ToggleMark);
+            let _ = app.apply(Command::CopyAtPaths);
+            assert_eq!(
+                app.message.as_ref().unwrap().text,
+                "Send failed: herdr: pane gone"
+            );
+            assert_eq!(marked(&app), [0]);
+        }
     }
 
     /// Run git in `dir` for test setup; returns false if git is unavailable.
