@@ -291,7 +291,7 @@ description = "open kura (popup)"
 
 ### 新しい worktree で kura を開く（opt-in）
 
-Herdr が worktree を作ったとき（`herdr worktree create` や UI の worktree 作成）に、kura を自動で開くこともできます。新しい worktree のペインの右に、その worktree のディレクトリで分割して開き、フォーカスは移しません（フォーカスしていない workspace に作られた場合も同じです）。イベントのフックはプラグインを入れた全員に効くため、既定では無効です。有効にするには、プラグインの設定ディレクトリに `open-on-worktree-created` という空のファイルを作ります。
+Herdr が worktree を作ったとき（`herdr worktree create` やソケットの `worktree.create`）に、kura を自動で開くこともできます。新しい worktree のペインの右に、その worktree のディレクトリで分割して開き、フォーカスは移しません（フォーカスしていない workspace に作られた場合も同じです）。イベントのフックはプラグインを入れた全員に効くため、既定では無効です。有効にするには、プラグインの設定ディレクトリに `open-on-worktree-created` という空のファイルを作ります。
 
 ```bash
 touch "$(herdr plugin config-dir kura)/open-on-worktree-created"

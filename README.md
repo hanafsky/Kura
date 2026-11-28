@@ -291,7 +291,7 @@ Notes on the popup:
 
 ### Open kura in new worktrees (opt-in)
 
-The plugin can also open kura whenever Herdr creates a worktree (`herdr worktree create`, or the worktree command in the UI): it splits kura to the right of the new worktree's pane, in that worktree, without moving the focus, also when the worktree's workspace is not the focused one. This is off by default, because event hooks run for everyone who installed the plugin. To turn it on, create an empty file named `open-on-worktree-created` in the plugin's config directory:
+The plugin can also open kura whenever Herdr creates a worktree (`herdr worktree create` or the `worktree.create` socket method): it splits kura to the right of the new worktree's pane, in that worktree, without moving the focus, also when the worktree's workspace is not the focused one. This is off by default, because event hooks run for everyone who installed the plugin. To turn it on, create an empty file named `open-on-worktree-created` in the plugin's config directory:
 
 ```bash
 touch "$(herdr plugin config-dir kura)/open-on-worktree-created"
