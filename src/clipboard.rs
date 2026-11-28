@@ -312,7 +312,7 @@ pub fn copy_paths(app: &mut App, paths: &[PathBuf]) -> bool {
     let text = format_at_paths(paths, &app.launch_dir, path_style());
     match deliver(&text, &choose_plan(&ClipEnv::current())) {
         Ok(_) => {
-            app.current_pane_mut().marked.clear();
+            crate::actions::clear_sent_marks(app);
             app.notify_info(format!("Copied {} path(s)", paths.len()));
             true
         }

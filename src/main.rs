@@ -1,5 +1,6 @@
 mod actions;
 mod ade;
+mod agent_changes;
 mod app;
 mod cli;
 mod clipboard;

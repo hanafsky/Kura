@@ -320,10 +320,12 @@ pub fn send_at_paths(app: &mut App) {
         }
         1 => send_to(app, &env, &targets.remove(0), &paths),
         _ => {
+            let back = Box::new(std::mem::replace(&mut app.mode, Mode::Filer));
             app.mode = Mode::SendTarget {
                 targets,
                 selected: 0,
                 paths,
+                back,
             }
         }
     }
@@ -335,10 +337,12 @@ pub fn confirm_send_target(app: &mut App) {
         targets,
         selected,
         paths,
+        back,
     } = std::mem::replace(&mut app.mode, Mode::Filer)
     else {
         return;
     };
+    app.mode = *back;
     let (Ade::Herdr(env), Some(agent)) = (app.ade.clone(), targets.get(selected)) else {
         return;
     };
@@ -354,7 +358,7 @@ fn send_to(app: &mut App, env: &HerdrEnv, agent: &Agent, paths: &[PathBuf]) {
     let text = send_text(paths, &base);
     match HerdrClient::new(&env.socket).send_text(&agent.pane_id, &text) {
         Ok(()) => {
-            app.current_pane_mut().marked.clear();
+            crate::actions::clear_sent_marks(app);
             app.notify_info(format!(
                 "Sent {} path(s) to {}",
                 paths.len(),

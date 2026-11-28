@@ -49,6 +49,20 @@ const FILER_KEYS: Bindings = &[
     (KeyCode::Char('N'), Command::SearchPrev),
     (KeyCode::Char('D'), Command::Diff),
     (KeyCode::Char('R'), Command::Refresh),
+    (KeyCode::Char('A'), Command::ToggleAgentChanges),
+];
+
+/// Agent changes list (`A`).
+const CHANGES_KEYS: Bindings = &[
+    (KeyCode::Char('j'), Command::MoveDown(1)),
+    (KeyCode::Char('k'), Command::MoveUp(1)),
+    (KeyCode::Enter, Command::Open),
+    (KeyCode::Char('e'), Command::OpenEditor),
+    (KeyCode::Char('Y'), Command::CopyAtPaths),
+    (KeyCode::Char('R'), Command::Refresh),
+    (KeyCode::Char('A'), Command::ToggleAgentChanges),
+    (KeyCode::Esc, Command::Back),
+    (KeyCode::Char('q'), Command::Back),
 ];
 
 /// Visual (range) selection.
@@ -134,6 +148,7 @@ fn mode_command(mode: &Mode, code: KeyCode) -> Option<Command> {
         Mode::Viewer { diff: true, .. } => lookup(DIFF_KEYS, code),
         Mode::Viewer { .. } => lookup(VIEWER_KEYS, code),
         Mode::Preview => lookup(PREVIEW_KEYS, code),
+        Mode::Changes { .. } => lookup(CHANGES_KEYS, code),
         Mode::Sort { .. } => lookup(SORT_KEYS, code),
         Mode::SendTarget { .. } => lookup(SEND_TARGET_KEYS, code),
         Mode::Search { .. } => Some(match code {
@@ -184,15 +199,18 @@ impl KeyState {
             mode,
             Mode::ConfirmDelete { .. } | Mode::PasteConflict { .. } | Mode::SendTarget { .. }
         );
-        // In the diff viewer 'q' closes the diff (see DIFF_KEYS).
-        let q_closes = matches!(mode, Mode::Viewer { diff: true, .. });
+        // In the diff viewer and the agent changes list 'q' closes them
+        // (see DIFF_KEYS, CHANGES_KEYS).
+        let q_closes = matches!(mode, Mode::Viewer { diff: true, .. } | Mode::Changes { .. });
         if code == KeyCode::Char('q') && !text_input && !in_dialog && !q_closes {
             return Some(Command::Quit);
         }
 
         if let KeyCode::Char(c) = code {
-            if matches!(mode, Mode::Filer | Mode::Viewer { .. } | Mode::Preview)
-                && c.is_ascii_digit()
+            if matches!(
+                mode,
+                Mode::Filer | Mode::Viewer { .. } | Mode::Preview | Mode::Changes { .. }
+            ) && c.is_ascii_digit()
             {
                 self.prefix = self
                     .prefix
@@ -714,6 +732,7 @@ mod tests {
             targets: vec![],
             selected: 0,
             paths: vec![],
+            back: Box::new(Mode::Filer),
         };
         assert_eq!(run(&t, &[ch('j')]), [Command::MoveDown(1)]);
         assert_eq!(run(&t, &[KeyCode::Down]), [Command::MoveDown(1)]);
@@ -817,5 +836,29 @@ mod tests {
             anchor: PathBuf::from("/x"),
         };
         assert!(run(&visual, &[ch('m')]).is_empty());
+    }
+
+    #[test]
+    fn agent_changes_keys() {
+        let changes = Mode::Changes {
+            items: vec![PathBuf::from("/x")],
+            selected: 0,
+        };
+        assert_eq!(run(&Mode::Filer, &[ch('A')]), [Command::ToggleAgentChanges]);
+        assert_eq!(run(&changes, &[ch('A')]), [Command::ToggleAgentChanges]);
+        assert_eq!(run(&changes, &[KeyCode::Esc]), [Command::Back]);
+        assert_eq!(run(&changes, &[KeyCode::Enter]), [Command::Open]);
+        assert_eq!(run(&changes, &[ch('e')]), [Command::OpenEditor]);
+        assert_eq!(run(&changes, &[ch('Y')]), [Command::CopyAtPaths]);
+        assert_eq!(run(&changes, &[ch('R')]), [Command::Refresh]);
+        assert_eq!(run(&changes, &[ch('3'), ch('j')]), [Command::MoveDown(3)]);
+        assert_eq!(run(&changes, &[ch('k')]), [Command::MoveUp(1)]);
+        assert_eq!(run(&changes, &[ch('g'), ch('g')]), [Command::GoTop]);
+        assert_eq!(run(&changes, &[ch('G')]), [Command::GoBottom]);
+        assert_eq!(run(&changes, &[ch('q')]), [Command::Back]);
+        // File-list operations do not apply to the list.
+        assert!(run(&changes, &[ch('x')]).is_empty());
+        assert!(run(&changes, &[ch('p')]).is_empty());
+        assert_eq!(run(&search(), &[ch('A')]), [Command::InsertChar('A')]);
     }
 }

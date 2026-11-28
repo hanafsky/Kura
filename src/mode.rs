@@ -52,6 +52,12 @@ pub enum Mode {
     PasteConflict {
         pending: crate::paste::PendingPaste,
     },
+    /// Files the coding agent changed (`A`), listed in the active pane
+    /// newest first; see [`crate::agent_changes`].
+    Changes {
+        items: Vec<PathBuf>,
+        selected: usize,
+    },
     /// Choose the agent pane to send `@path` references to (`Y` in herdr
     /// with several agents).
     SendTarget {
@@ -59,5 +65,8 @@ pub enum Mode {
         selected: usize,
         /// The entries to send.
         paths: Vec<PathBuf>,
+        /// Where the dialog was opened (the file list or the agent
+        /// changes list), restored when it closes.
+        back: Box<Mode>,
     },
 }

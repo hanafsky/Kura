@@ -7,6 +7,7 @@ use ratatui::{
 };
 
 use crate::{
+    agent_changes,
     app::{App, MessageLevel, Pane},
     delete_confirm::{dialog_lines, dialog_title, DeleteKind},
     git::FileStatus,
@@ -15,7 +16,7 @@ use crate::{
     text_view::{self, PreviewContent},
     watch::{self, Recency},
 };
-use std::time::SystemTime;
+use std::{path::PathBuf, time::SystemTime};
 use unicode_width::UnicodeWidthStr;
 
 pub fn ui(f: &mut Frame, app: &mut App) {
@@ -89,6 +90,17 @@ pub fn ui(f: &mut Frame, app: &mut App) {
                 let pane = if left_active { &app.left } else { &app.right };
                 draw_pane(f, pane_area, pane, true, app.session_start);
                 app.preview.draw(f, preview_area);
+            }
+            // Agent changes (`A`) replace the active pane.
+            Mode::Changes { items, selected } => {
+                let (list_area, pane_area) = if left_active {
+                    (panes[0], panes[1])
+                } else {
+                    (panes[1], panes[0])
+                };
+                let other = if left_active { &app.right } else { &app.left };
+                draw_changes(f, list_area, app, items, *selected);
+                draw_pane(f, pane_area, other, false, app.session_start);
             }
             // Text preview (`P`) of the entry under the cursor.
             _ if app.text_preview.is_some() => {
@@ -241,10 +253,14 @@ fn draw_paste_conflict(f: &mut Frame, planner: &crate::paste::Planner) {
 /// selection count on the right.
 fn draw_status_line(f: &mut Frame, area: Rect, app: &App) {
     let pane = app.current_pane();
-    let mut info = if pane.items.is_empty() {
+    let (selected, len) = match &app.mode {
+        Mode::Changes { items, selected } => (*selected, items.len()),
+        _ => (pane.selected, pane.items.len()),
+    };
+    let mut info = if len == 0 {
         "0/0".to_string()
     } else {
-        format!("{}/{}", pane.selected + 1, pane.items.len())
+        format!("{}/{}", selected + 1, len)
     };
     let marked = pane.marked_count();
     if marked > 0 {
@@ -374,6 +390,66 @@ fn draw_pane(f: &mut Frame, area: Rect, pane: &Pane, active: bool, session_start
     let mut state = ListState::default();
     state.select(Some(pane.selected));
     let list = List::new(items)
+        .block(block)
+        .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
+        .highlight_symbol(">> ");
+    f.render_stateful_widget(list, area, &mut state);
+}
+
+/// Agent changes list (`A`): the changed files, newest first, relative to
+/// the directory kura was started in. Recently changed files are
+/// highlighted like in the file list; files that are gone are dimmed.
+fn draw_changes(f: &mut Frame, area: Rect, app: &App, items: &[PathBuf], selected: usize) {
+    let now = SystemTime::now();
+    let roots = app.change_roots();
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(Span::styled(
+            format!(" Agent changes: {} ", app.launch_dir.display()),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .title_bottom(
+            Line::from(" Enter: go to file  e: edit  Y: copy @path  A/q/Esc: close ")
+                .right_aligned(),
+        );
+    if items.is_empty() {
+        let text = Span::styled(
+            "No changes logged yet (see the README for the hook)",
+            Style::default().fg(Color::Gray),
+        );
+        f.render_widget(Paragraph::new(text).block(block), area);
+        return;
+    }
+    let rows: Vec<ListItem> = items
+        .iter()
+        .map(|path| {
+            let shown = agent_changes::display_path(path, &roots);
+            let line = match std::fs::metadata(path) {
+                Ok(meta) => {
+                    let style = if meta.is_dir() {
+                        Style::default().fg(Color::Blue)
+                    } else {
+                        Style::default()
+                    };
+                    let recency = meta
+                        .modified()
+                        .ok()
+                        .and_then(|m| watch::classify(m, now, app.session_start));
+                    Line::from(Span::styled(shown, style.patch(recency_style(recency))))
+                }
+                Err(_) => Line::from(vec![
+                    Span::styled(shown, Style::default().fg(Color::DarkGray)),
+                    Span::styled(" (deleted)", Style::default().fg(Color::DarkGray)),
+                ]),
+            };
+            ListItem::new(line)
+        })
+        .collect();
+    let mut state = ListState::default();
+    state.select(Some(selected));
+    let list = List::new(rows)
         .block(block)
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
         .highlight_symbol(">> ");
