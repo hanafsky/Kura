@@ -199,3 +199,20 @@ The directories shown in the two panes are watched, and the listing updates by i
 - unset: OS file events
 - `poll`: re-scan every second, for filesystems without events (e.g. WSL2 `/mnt/c`, network drives)
 - `off`: no watching (press `R` to reload)
+
+### Controlling kura from outside (`kura msg`)
+
+A running kura accepts commands from other programs (coding agents, scripts, your editor):
+
+```sh
+kura msg reveal src/main.rs   # show the file in the active pane, cursor on it
+kura msg cd ~/project         # move the active pane to the directory
+```
+
+Relative paths are resolved against the sender's working directory. The message goes to:
+
+1. the socket given with `--socket <PATH>`, else
+2. `$KURA_SOCKET` — kura sets it for the programs it starts (the editor opened with `e`, …), so they reach their own kura, else
+3. the most recently started kura that is still running.
+
+Each kura listens on `$XDG_RUNTIME_DIR/kura/kura-<pid>.sock` (or `<temp dir>/kura-<uid>/kura-<pid>.sock` when `XDG_RUNTIME_DIR` is unset); the socket is removed on exit. Views (text viewer, preview, sort menu) are closed first; while a prompt or dialog is open (search, rename, delete confirmation) the command is refused and the reason is shown in the status line. The protocol is one JSON object per line (`{"cmd":"reveal","path":"/abs/path"}`), answered with `{"ok":true}` or `{"ok":false,"error":"..."}`. To open a directory named `msg`, write `kura ./msg`.

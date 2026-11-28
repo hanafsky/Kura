@@ -5,6 +5,7 @@
 //! the same operations without a terminal.
 
 use std::ops::ControlFlow;
+use std::path::{Path, PathBuf};
 
 use crate::actions::{
     copy_selection, delete_items, paste, rename_selected, resolve_paste_conflict, target_paths,
@@ -20,7 +21,7 @@ use crate::paste::ConflictChoice;
 use crate::preview::{prefetch_around, step_media};
 use crate::text_view::{self, TextDoc};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
     /// Exit kura.
     Quit,
@@ -109,6 +110,12 @@ pub enum Command {
     DeleteChar,
     /// Leave the current mode or dialog without committing anything.
     Back,
+    /// Show `path` in the active pane: go to its parent directory and put
+    /// the cursor on it (`kura msg reveal`). The path must be absolute.
+    Reveal(PathBuf),
+    /// Move the active pane to the directory `path` (`kura msg cd`). The
+    /// path must be absolute.
+    ChangeDir(PathBuf),
 }
 
 impl Command {
@@ -302,10 +309,79 @@ impl App {
                 Mode::Search { .. } => self.end_search(),
                 _ => self.mode = Mode::Filer,
             },
+            // Sent from outside (`kura msg`); refused (with a message) while
+            // a prompt or dialog is open.
+            Command::Reveal(path) if self.leave_for_external("reveal") => self.reveal(&path),
+            Command::ChangeDir(path) if self.leave_for_external("cd") => self.change_dir_to(&path),
             // Filer-only commands issued in another mode.
             _ => {}
         }
         ControlFlow::Continue(())
+    }
+
+    /// Get back to the file list for a command sent from outside
+    /// (`kura msg`). Views and menus are closed; a prompt or dialog that
+    /// holds the user's input is kept and the command is refused.
+    fn leave_for_external(&mut self, what: &str) -> bool {
+        match self.mode {
+            Mode::Filer => true,
+            Mode::Preview => {
+                self.close_preview();
+                true
+            }
+            Mode::Viewer { .. } | Mode::Sort { .. } | Mode::Visual { .. } => {
+                self.mode = Mode::Filer;
+                true
+            }
+            Mode::Search { .. }
+            | Mode::Rename { .. }
+            | Mode::ConfirmDelete { .. }
+            | Mode::PasteConflict { .. } => {
+                self.notify_error(format!("Cannot {what}: finish the current prompt first"));
+                false
+            }
+        }
+    }
+
+    /// [`Command::Reveal`]: list the parent of `path` in the active pane
+    /// and put the cursor on `path`. The marks are kept when the pane
+    /// already shows that directory.
+    fn reveal(&mut self, path: &Path) {
+        let Some(parent) = path.parent() else {
+            // The root has no parent: show it instead.
+            self.change_dir_to(path);
+            return;
+        };
+        if let Err(e) = path.symlink_metadata() {
+            self.notify_error(fs_error_message(&e, path));
+            return;
+        }
+        let pane = self.current_pane_mut();
+        if pane.current_dir != parent {
+            if let Err(e) = pane.change_dir(parent.to_path_buf()) {
+                self.notify_error(fs_error_message(&e, parent));
+                return;
+            }
+        }
+        let pane = self.current_pane_mut();
+        match pane.items.iter().position(|e| e.path() == path) {
+            Some(pos) => pane.selected = pos,
+            None => {
+                let name = path.file_name().unwrap_or_default().to_string_lossy();
+                self.notify_error(format!("Hidden by a filter: {name}"));
+            }
+        }
+    }
+
+    /// [`Command::ChangeDir`]: move the active pane to the directory `path`.
+    fn change_dir_to(&mut self, path: &Path) {
+        let pane = self.current_pane_mut();
+        if pane.current_dir == path {
+            return;
+        }
+        if let Err(e) = pane.change_dir(path.to_path_buf()) {
+            self.notify_error(fs_error_message(&e, path));
+        }
     }
 
     /// `MoveDown` / `MoveUp` in the current mode.
@@ -591,6 +667,118 @@ mod tests {
         let _ = app.apply(Command::SearchStart);
         let _ = app.apply(Command::OpenEditor);
         assert_eq!(app.pending_edit, None);
+    }
+
+    /// A temp dir with `a`, `sub/x`, `sub/y`, `sub/.hidden`; canonical path.
+    fn tree() -> (tempfile::TempDir, std::path::PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        fs::write(root.join("a"), "a").unwrap();
+        fs::create_dir(root.join("sub")).unwrap();
+        for name in ["x", "y", ".hidden"] {
+            fs::write(root.join("sub").join(name), name).unwrap();
+        }
+        (tmp, root)
+    }
+
+    #[test]
+    fn reveal_goes_to_the_parent_and_selects_the_entry() {
+        let (_tmp, root) = tree();
+        let mut app = app_in(&root);
+        assert!(app.apply(Command::Reveal(root.join("sub/y"))).is_continue());
+        assert_eq!(app.current_pane().current_dir, root.join("sub"));
+        assert_eq!(selected_name(&app), "y");
+        assert!(app.message.is_none());
+        // A directory is selected in its parent, not entered.
+        let _ = app.apply(Command::Reveal(root.join("sub")));
+        assert_eq!(app.current_pane().current_dir, root);
+        assert_eq!(selected_name(&app), "sub");
+        // Only the active pane moves.
+        assert_eq!(app.right.current_dir, root);
+        app.switch_pane();
+        let _ = app.apply(Command::Reveal(root.join("sub/x")));
+        assert_eq!(app.right.current_dir, root.join("sub"));
+        assert_eq!(app.left.current_dir, root);
+    }
+
+    #[test]
+    fn reveal_in_the_shown_directory_keeps_the_marks() {
+        let tmp = abcd();
+        let dir = tmp.path().canonicalize().unwrap();
+        let mut app = app_in(&dir);
+        let _ = app.apply(Command::ToggleMark); // a
+        let _ = app.apply(Command::Reveal(dir.join("c")));
+        assert_eq!(selected_name(&app), "c");
+        assert_eq!(marked(&app), vec![0]);
+    }
+
+    #[test]
+    fn reveal_reports_missing_and_filtered_entries() {
+        let (_tmp, root) = tree();
+        let mut app = app_in(&root);
+        let _ = app.apply(Command::Reveal(root.join("sub/missing")));
+        assert_eq!(app.current_pane().current_dir, root);
+        assert_eq!(app.message.as_ref().unwrap().level, MessageLevel::Error);
+
+        let _ = app.apply(Command::ToggleHidden);
+        let _ = app.apply(Command::Reveal(root.join("sub/.hidden")));
+        assert_eq!(app.current_pane().current_dir, root.join("sub"));
+        let msg = app.message.as_ref().unwrap();
+        assert_eq!(msg.level, MessageLevel::Error);
+        assert_eq!(msg.text, "Hidden by a filter: .hidden");
+    }
+
+    #[test]
+    fn change_dir_moves_the_active_pane() {
+        let (_tmp, root) = tree();
+        let mut app = app_in(&root);
+        let _ = app.apply(Command::ChangeDir(root.join("sub")));
+        assert_eq!(app.current_pane().current_dir, root.join("sub"));
+        assert_eq!(app.current_pane().selected, 0);
+        assert!(app.message.is_none());
+        // A file or a missing path leaves the pane where it is.
+        let _ = app.apply(Command::ChangeDir(root.join("a")));
+        assert_eq!(app.current_pane().current_dir, root.join("sub"));
+        assert_eq!(app.message.as_ref().unwrap().level, MessageLevel::Error);
+        app.message = None;
+        let _ = app.apply(Command::ChangeDir(root.join("nope")));
+        assert_eq!(app.current_pane().current_dir, root.join("sub"));
+        assert!(app.message.is_some());
+    }
+
+    #[test]
+    fn external_commands_close_views_but_not_prompts() {
+        let (_tmp, root) = tree();
+        let mut app = app_in(&root);
+        // The text viewer is closed.
+        let _ = app.apply(Command::Open); // a (files come after dirs: sub, a)
+        let _ = app.apply(Command::GoBottom);
+        let _ = app.apply(Command::Open);
+        assert!(matches!(app.mode, Mode::Viewer { .. }));
+        let _ = app.apply(Command::Reveal(root.join("sub/x")));
+        assert!(matches!(app.mode, Mode::Filer));
+        assert_eq!(selected_name(&app), "x");
+        // So is the sort menu.
+        let _ = app.apply(Command::SortMenu);
+        let _ = app.apply(Command::ChangeDir(root.clone()));
+        assert!(matches!(app.mode, Mode::Filer));
+        assert_eq!(app.current_pane().current_dir, root);
+        // A search in progress is kept and the command refused.
+        let _ = app.apply(Command::SearchStart);
+        let _ = app.apply(Command::InsertChar('s'));
+        let _ = app.apply(Command::ChangeDir(root.join("sub")));
+        assert!(matches!(&app.mode, Mode::Search { query } if query == "s"));
+        assert_eq!(app.current_pane().current_dir, root);
+        assert_eq!(
+            app.message.as_ref().unwrap().text,
+            "Cannot cd: finish the current prompt first"
+        );
+        let _ = app.apply(Command::Back);
+        // So is a delete confirmation.
+        let _ = app.apply(Command::Delete(DeleteKind::Normal));
+        let _ = app.apply(Command::Reveal(root.join("sub/x")));
+        assert!(matches!(app.mode, Mode::ConfirmDelete { .. }));
+        assert_eq!(app.current_pane().current_dir, root);
     }
 
     #[test]
@@ -1081,7 +1269,7 @@ mod tests {
         assert!(viewer_at_end(&app));
         for up in [Command::MoveUp(1), Command::PageUp(1), Command::GoTop] {
             let _ = app.apply(Command::GoBottom);
-            let _ = app.apply(up);
+            let _ = app.apply(up.clone());
             assert!(!viewer_at_end(&app), "{up:?}");
         }
         // `j` reaching the end sets it; one row short does not.
