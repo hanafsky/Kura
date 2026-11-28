@@ -319,6 +319,19 @@ impl App {
         ControlFlow::Continue(())
     }
 
+    /// Carry out a command sent from outside (`kura msg`) and tell the
+    /// sender how it went: the error shown in the status line, if any.
+    /// Like a key press, it replaces the status message. Such commands
+    /// never quit kura.
+    pub fn apply_external(&mut self, cmd: Command) -> Result<(), String> {
+        self.message = None;
+        let _ = self.apply(cmd);
+        match &self.message {
+            Some(m) if m.level == crate::app::MessageLevel::Error => Err(m.text.clone()),
+            _ => Ok(()),
+        }
+    }
+
     /// Get back to the file list for a command sent from outside
     /// (`kura msg`). Views and menus are closed; a prompt or dialog that
     /// holds the user's input is kept and the command is refused.
@@ -779,6 +792,27 @@ mod tests {
         let _ = app.apply(Command::Reveal(root.join("sub/x")));
         assert!(matches!(app.mode, Mode::ConfirmDelete { .. }));
         assert_eq!(app.current_pane().current_dir, root);
+    }
+
+    #[test]
+    fn external_commands_report_the_status_line_error() {
+        let (_tmp, root) = tree();
+        let mut app = app_in(&root);
+        app.notify_error("old message");
+        assert_eq!(
+            app.apply_external(Command::Reveal(root.join("sub/x"))),
+            Ok(())
+        );
+        assert!(app.message.is_none());
+        assert_eq!(selected_name(&app), "x");
+        assert!(app
+            .apply_external(Command::ChangeDir(root.join("a")))
+            .is_err());
+        let _ = app.apply(Command::SearchStart);
+        assert_eq!(
+            app.apply_external(Command::ChangeDir(root.clone())),
+            Err("Cannot cd: finish the current prompt first".into())
+        );
     }
 
     #[test]

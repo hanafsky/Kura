@@ -244,7 +244,7 @@ pub fn run_app<B: Backend<Error = io::Error> + Write>(
     terminal: &mut Terminal<B>,
     app: &mut App,
     typeahead: Vec<KeyCode>,
-    ipc_requests: &mpsc::Receiver<ipc::Request>,
+    ipc_requests: &mpsc::Receiver<ipc::Incoming>,
 ) -> io::Result<()> {
     let (tx, fs_events) = mpsc::channel::<FsEvent>();
     let mode = watch::parse_watch_mode(std::env::var(watch::WATCH_ENV).ok().as_deref());
@@ -290,13 +290,9 @@ pub fn run_app<B: Backend<Error = io::Error> + Write>(
                 _ => {}
             }
         }
-        while let Ok(request) = ipc_requests.try_recv() {
-            // Like a key press, a request replaces the status message.
-            app.message = None;
+        while let Ok(incoming) = ipc_requests.try_recv() {
             dirty = true;
-            if app.apply(request.into_command()).is_break() {
-                return Ok(());
-            }
+            incoming.run(|request| app.apply_external(request.into_command()));
         }
         while let Ok(fs_event) = fs_events.try_recv() {
             app.handle_fs_event(&fs_event);

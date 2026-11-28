@@ -10,10 +10,11 @@
 //!
 //! The protocol is one JSON object per line, answered by one line:
 //! `{"cmd":"reveal","path":"/abs/file"}` → `{"ok":true}` or
-//! `{"ok":false,"error":"..."}`. The answer only says that the request
-//! was understood; the result (e.g. a directory that cannot be read)
-//! shows in kura's status line. Requests are read on a background thread
-//! and handed to the event loop through a channel, like file changes.
+//! `{"ok":false,"error":"..."}`. The answer comes after the event loop has
+//! carried out the request, so an error (a directory that cannot be read,
+//! a prompt that is open) reaches the sender. Requests are read on a
+//! background thread and handed to the event loop through a channel, like
+//! file changes; the result goes back through another channel.
 
 use std::{
     ffi::OsStr,
@@ -25,8 +26,8 @@ use std::{
     },
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicUsize, Ordering},
-        mpsc::Sender,
+        atomic::{AtomicU8, AtomicUsize, Ordering},
+        mpsc::{self, Sender},
         Arc,
     },
     time::{Duration, SystemTime},
@@ -45,6 +46,10 @@ const MAX_LINE: usize = 64 * 1024;
 
 /// How long either side waits for the other to send or receive.
 const IO_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// How long a request may wait for the event loop (which is held up while
+/// the editor runs). After that it is dropped and answered with an error.
+const REPLY_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Connections served at the same time.
 const MAX_CONNECTIONS: usize = 16;
@@ -78,6 +83,67 @@ impl Request {
     }
 }
 
+/// A request waiting for the event loop, with the way back to its sender.
+#[derive(Debug)]
+pub struct Incoming {
+    pub request: Request,
+    state: Arc<AtomicU8>,
+    reply: Sender<Result<(), String>>,
+}
+
+/// [`Incoming::state`]: not yet taken by either side.
+const PENDING: u8 = 0;
+/// Taken by the event loop, which will answer.
+const TAKEN: u8 = 1;
+/// Given up by the connection after [`REPLY_TIMEOUT`]; must not be run.
+const ABANDONED: u8 = 2;
+
+impl Incoming {
+    /// Carry out the request with `run` and send its result back, unless
+    /// the sender has already been told that it timed out.
+    pub fn run(self, run: impl FnOnce(Request) -> Result<(), String>) {
+        if self
+            .state
+            .compare_exchange(PENDING, TAKEN, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            let _ = self.reply.send(run(self.request));
+        }
+    }
+}
+
+/// Hand `request` to the event loop and wait for its result. `None` when
+/// the event loop has ended.
+fn dispatch<E>(
+    request: Request,
+    tx: &Sender<E>,
+    wrap: fn(Incoming) -> E,
+) -> Option<Result<(), String>> {
+    let (reply_tx, reply_rx) = mpsc::channel();
+    let state = Arc::new(AtomicU8::new(PENDING));
+    let incoming = Incoming {
+        request,
+        state: Arc::clone(&state),
+        reply: reply_tx,
+    };
+    tx.send(wrap(incoming)).ok()?;
+    match reply_rx.recv_timeout(REPLY_TIMEOUT) {
+        Ok(result) => Some(result),
+        Err(mpsc::RecvTimeoutError::Disconnected) => None,
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            if state
+                .compare_exchange(PENDING, ABANDONED, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                Some(Err("kura is busy (timed out); nothing was done".into()))
+            } else {
+                // The event loop took it just now: its answer is coming.
+                reply_rx.recv().ok()
+            }
+        }
+    }
+}
+
 /// The answer to one request line.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Reply {
@@ -87,7 +153,7 @@ pub struct Reply {
 }
 
 impl Reply {
-    fn from_result(result: &Result<Request, String>) -> Self {
+    fn from_result<T>(result: &Result<T, String>) -> Self {
         match result {
             Ok(_) => Reply {
                 ok: true,
@@ -203,7 +269,7 @@ impl Server {
     /// put the socket in [`SOCKET_ENV`] for the programs kura starts. On
     /// failure the variable is removed, so that they do not reach the kura
     /// this one was started from. Call before any other thread exists.
-    pub fn start<E: Send + 'static>(tx: Sender<E>, wrap: fn(Request) -> E) -> io::Result<Self> {
+    pub fn start<E: Send + 'static>(tx: Sender<E>, wrap: fn(Incoming) -> E) -> io::Result<Self> {
         let result = Self::bind_default().map(|(server, listener)| {
             std::env::set_var(SOCKET_ENV, &server.path);
             (server, listener)
@@ -226,7 +292,7 @@ impl Server {
     pub fn start_at<E: Send + 'static>(
         path: PathBuf,
         tx: Sender<E>,
-        wrap: fn(Request) -> E,
+        wrap: fn(Incoming) -> E,
     ) -> io::Result<Self> {
         let (server, listener) = Self::bind(path)?;
         server.spawn(listener, tx, wrap)
@@ -251,7 +317,7 @@ impl Server {
         self,
         listener: UnixListener,
         tx: Sender<E>,
-        wrap: fn(Request) -> E,
+        wrap: fn(Incoming) -> E,
     ) -> io::Result<Self> {
         std::thread::Builder::new()
             .name("kura-ipc".into())
@@ -269,7 +335,7 @@ impl Drop for Server {
 /// Accept connections, each answered on a thread of its own so that a
 /// client that stays silent does not hold up the others. At most
 /// [`MAX_CONNECTIONS`] are served at once; more are closed right away.
-fn serve<E: Send + 'static>(listener: UnixListener, tx: Sender<E>, wrap: fn(Request) -> E) {
+fn serve<E: Send + 'static>(listener: UnixListener, tx: Sender<E>, wrap: fn(Incoming) -> E) {
     let open = Arc::new(AtomicUsize::new(0));
     for stream in listener.incoming() {
         let Ok(stream) = stream else {
@@ -294,7 +360,7 @@ fn serve<E: Send + 'static>(listener: UnixListener, tx: Sender<E>, wrap: fn(Requ
 }
 
 /// Answer every request line of one connection.
-fn handle_connection<E>(stream: UnixStream, tx: &Sender<E>, wrap: fn(Request) -> E) {
+fn handle_connection<E>(stream: UnixStream, tx: &Sender<E>, wrap: fn(Incoming) -> E) {
     let _ = stream.set_read_timeout(Some(IO_TIMEOUT));
     let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
     let Ok(read_half) = stream.try_clone() else {
@@ -312,19 +378,20 @@ fn handle_connection<E>(stream: UnixStream, tx: &Sender<E>, wrap: fn(Request) ->
             Line::Text(text) if text.trim().is_empty() => continue,
             Line::Text(text) => text,
             Line::TooLong => {
-                let reply = Reply::from_result(&Err("request too long".into()));
+                let reply = Reply::from_result::<()>(&Err("request too long".into()));
                 let _ = writer.write_all(json_line(&reply).as_bytes());
                 return;
             }
         };
-        let request = parse_request(&line);
-        let reply = Reply::from_result(&request);
-        if let Ok(request) = request {
-            if tx.send(wrap(request)).is_err() {
+        let result = match parse_request(&line) {
+            Ok(request) => match dispatch(request, tx, wrap) {
+                Some(result) => result,
                 // The event loop has ended; kura is exiting.
-                return;
-            }
-        }
+                None => return,
+            },
+            Err(e) => Err(e),
+        };
+        let reply = Reply::from_result(&result);
         if writer.write_all(json_line(&reply).as_bytes()).is_err() {
             return;
         }
@@ -388,7 +455,9 @@ pub fn send(socket: Option<&Path>, request: &Request) -> Result<(), String> {
         None => connect_latest(&default_socket_dir())?,
     };
     let io_err = |e: io::Error| format!("cannot talk to kura: {e}");
-    stream.set_read_timeout(Some(IO_TIMEOUT)).map_err(io_err)?;
+    stream
+        .set_read_timeout(Some(REPLY_TIMEOUT + IO_TIMEOUT))
+        .map_err(io_err)?;
     stream.set_write_timeout(Some(IO_TIMEOUT)).map_err(io_err)?;
     stream
         .write_all(json_line(request).as_bytes())
@@ -504,7 +573,7 @@ mod tests {
         let ok = Reply::from_result(&Ok(Request::Cd { path: "/".into() }));
         assert_eq!(json_line(&ok), "{\"ok\":true}\n");
         assert_eq!(parse_reply("{\"ok\":true}\n"), Ok(()));
-        let err = Reply::from_result(&Err("nope".into()));
+        let err = Reply::from_result::<()>(&Err("nope".into()));
         assert_eq!(json_line(&err), "{\"ok\":false,\"error\":\"nope\"}\n");
         assert_eq!(parse_reply(&json_line(&err)), Err("nope".into()));
         assert_eq!(parse_reply("{\"ok\":false}"), Err("request refused".into()));
@@ -627,18 +696,50 @@ mod tests {
         PathBuf::from(format!("/tmp/kura-t-{}-{tag}.sock", std::process::id()))
     }
 
+    /// Stand-in for the event loop: records each request and refuses
+    /// `cd /refuse`.
+    fn answer_requests(rx: mpsc::Receiver<Incoming>) -> mpsc::Receiver<Request> {
+        let (seen_tx, seen) = mpsc::channel();
+        std::thread::spawn(move || {
+            for incoming in rx {
+                let seen_tx = seen_tx.clone();
+                incoming.run(|request| {
+                    let refuse = request
+                        == Request::Cd {
+                            path: "/refuse".into(),
+                        };
+                    let _ = seen_tx.send(request);
+                    if refuse {
+                        Err("refused".into())
+                    } else {
+                        Ok(())
+                    }
+                });
+            }
+        });
+        seen
+    }
+
     #[test]
-    fn server_hands_requests_to_the_loop_and_removes_its_socket() {
+    fn server_answers_with_the_result_and_removes_its_socket() {
         let path = short_socket("srv");
         let (tx, rx) = mpsc::channel();
         let server = Server::start_at(path.clone(), tx, |r| r).unwrap();
+        let seen = answer_requests(rx);
         assert!(path.exists());
 
         let req = Request::Reveal {
             path: PathBuf::from("/a/b"),
         };
         assert_eq!(send(Some(&path), &req), Ok(()));
-        assert_eq!(rx.recv_timeout(IO_TIMEOUT), Ok(req));
+        assert_eq!(seen.recv_timeout(IO_TIMEOUT), Ok(req));
+
+        // The event loop's error reaches the sender.
+        let refused = Request::Cd {
+            path: "/refuse".into(),
+        };
+        assert_eq!(send(Some(&path), &refused), Err("refused".into()));
+        assert_eq!(seen.recv_timeout(IO_TIMEOUT), Ok(refused));
 
         // Bad input is answered with an error and does not stop the server.
         let mut raw = UnixStream::connect(&path).unwrap();
@@ -652,7 +753,7 @@ mod tests {
         assert!(parse_reply(lines[0]).is_err());
         assert_eq!(parse_reply(lines[1]), Ok(()));
         assert_eq!(
-            rx.recv_timeout(IO_TIMEOUT),
+            seen.recv_timeout(IO_TIMEOUT),
             Ok(Request::Cd { path: "/".into() })
         );
 
@@ -667,11 +768,29 @@ mod tests {
         let _idle = UnixStream::connect(&path).unwrap();
         let req = Request::Cd { path: "/x".into() };
         assert_eq!(send(Some(&path), &req), Ok(()));
-        assert_eq!(rx.recv_timeout(IO_TIMEOUT * 2), Ok(req));
+        assert_eq!(seen.recv_timeout(IO_TIMEOUT), Ok(req));
 
-        assert!(rx.try_recv().is_err());
+        assert!(seen.try_recv().is_err());
         drop(server);
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn a_request_the_loop_does_not_take_in_time_is_dropped() {
+        let path = short_socket("busy");
+        let (tx, rx) = mpsc::channel();
+        let _server = Server::start_at(path.clone(), tx, |r| r).unwrap();
+        let req = Request::Cd { path: "/".into() };
+        let err = send(Some(&path), &req).unwrap_err();
+        assert!(err.contains("timed out"), "{err}");
+        // When the loop gets to it, it is not carried out any more.
+        let incoming = rx.recv_timeout(IO_TIMEOUT).unwrap();
+        let mut ran = false;
+        incoming.run(|_| {
+            ran = true;
+            Ok(())
+        });
+        assert!(!ran);
     }
 
     #[test]
@@ -702,7 +821,7 @@ mod tests {
             .write_all(b"{\"cmd\":\"cd\",\"path\":\"/\"}\n")
             .unwrap();
         assert_eq!(
-            rx.recv_timeout(IO_TIMEOUT),
+            rx.recv_timeout(IO_TIMEOUT).map(|i: Incoming| i.request),
             Ok(Request::Cd { path: "/".into() })
         );
         assert!(!dead_path.exists());

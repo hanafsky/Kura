@@ -36,7 +36,7 @@ fn run(
     left: PathBuf,
     right: PathBuf,
     launch_dir: PathBuf,
-    ipc_rx: Receiver<ipc::Request>,
+    ipc_rx: Receiver<ipc::Incoming>,
     ipc_error: Option<String>,
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let backend = CrosstermBackend::new(io::stdout());
