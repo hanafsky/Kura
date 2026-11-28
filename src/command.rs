@@ -101,6 +101,9 @@ pub enum Command {
     ToggleMarkdown,
     /// Re-read both panes from disk (also works with `KURA_WATCH=off`).
     Refresh,
+    /// List the files the coding agent changed in the active pane (`A`),
+    /// or go back to the file list.
+    ToggleAgentChanges,
     /// Sort by the highlighted option.
     SortConfirm,
     /// Type a character into the search query or rename buffer.
@@ -132,6 +135,7 @@ impl App {
     /// Commands that make no sense in the current mode are ignored.
     pub fn apply(&mut self, cmd: Command) -> ControlFlow<()> {
         let filer = matches!(self.mode, Mode::Filer);
+        let changes = matches!(self.mode, Mode::Changes { .. });
         match cmd {
             Command::Quit => return ControlFlow::Break(()),
             Command::MoveDown(n) => self.move_by(n, true),
@@ -142,6 +146,7 @@ impl App {
             Command::HalfPageUp(n) => self.scroll_pages(n, true, false),
             Command::GoTop => match &mut self.mode {
                 Mode::Filer => self.current_pane_mut().selected = 0,
+                Mode::Changes { selected, .. } => *selected = 0,
                 Mode::Viewer { offset, at_end, .. } => {
                     *offset = 0;
                     *at_end = false;
@@ -153,6 +158,7 @@ impl App {
                     let pane = self.current_pane_mut();
                     pane.selected = pane.items.len().saturating_sub(1);
                 }
+                Mode::Changes { .. } => self.select_change(usize::MAX),
                 Mode::Viewer {
                     offset,
                     doc,
@@ -178,6 +184,7 @@ impl App {
                 PaneType::Right => self.on_left(),
             },
             Command::Open if filer => self.open_selected(),
+            Command::Open if changes => self.jump_to_change(),
             Command::OpenExternal if filer || matches!(self.mode, Mode::Preview) => {
                 if let Some(p) = self.selected_path() {
                     if let Err(e) = open_external(&p) {
@@ -186,6 +193,7 @@ impl App {
                 }
             }
             Command::OpenEditor if filer => self.pending_edit = self.selected_path(),
+            Command::OpenEditor if changes => self.edit_change(),
             Command::ToggleMark if filer => toggle_mark(self.current_pane_mut()),
             Command::VisualStart if filer => {
                 if let Some(anchor) = self.selected_path() {
@@ -196,6 +204,7 @@ impl App {
             Command::Yank if filer => copy_selection(self),
             Command::Paste if filer => paste(self),
             Command::CopyAtPaths if filer => crate::clipboard::copy_at_paths(self),
+            Command::CopyAtPaths if changes => self.copy_change_at_path(),
             Command::Delete(kind) if filer => {
                 let items = target_paths(self);
                 if !items.is_empty() {
@@ -253,6 +262,12 @@ impl App {
             }
             Command::Diff if filer => self.show_diff(),
             Command::Refresh if filer => self.refresh_all(),
+            Command::Refresh if changes => {
+                self.reload_agent_changes();
+                self.refresh_all();
+            }
+            Command::ToggleAgentChanges if filer => self.open_agent_changes(),
+            Command::ToggleAgentChanges if changes => self.mode = Mode::Filer,
             Command::ToggleTextPreview if filer => self.toggle_text_preview(),
             Command::ToggleMarkdown => self.toggle_markdown(),
             Command::SortConfirm => {
@@ -343,6 +358,7 @@ impl App {
                     });
             }
             Mode::Preview => self.preview_step(n, down),
+            Mode::Changes { .. } => self.move_change_cursor(n, down),
             Mode::Sort { selected } => {
                 let len = SORT_MENU_ROWS;
                 for _ in 0..n {

@@ -52,4 +52,10 @@ pub enum Mode {
     PasteConflict {
         pending: crate::paste::PendingPaste,
     },
+    /// Files the coding agent changed (`A`), listed in the active pane
+    /// newest first; see [`crate::agent_changes`].
+    Changes {
+        items: Vec<PathBuf>,
+        selected: usize,
+    },
 }

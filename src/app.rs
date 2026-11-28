@@ -332,6 +332,9 @@ pub struct App {
     /// that scrolling can stop at the last wrapped row (`G`, `j`). `None`
     /// before the viewer was first drawn.
     pub viewer_size: Option<(u16, u16)>,
+    /// Log of the files the coding agent changed (`A`); `None` if no
+    /// location could be worked out.
+    pub agent_log: Option<PathBuf>,
 }
 
 impl App {
@@ -364,6 +367,7 @@ impl App {
             session_start: SystemTime::now(),
             text_preview: None,
             viewer_size: None,
+            agent_log: crate::agent_changes::log_path_from_env(),
         })
     }
 
@@ -491,10 +495,16 @@ impl App {
 
     /// Directories the watcher should follow (both panes, once if equal).
     /// A shown directory that was removed is dropped, so the watcher does
-    /// not keep reporting it (it is watched again once it exists).
+    /// not keep reporting it (it is watched again once it exists). While
+    /// the agent changes are listed (`A`), the log's directory is watched too.
     pub fn watch_targets(&self) -> Vec<PathBuf> {
         let mut targets = watch::watch_targets(&self.left.current_dir, &self.right.current_dir);
         targets.retain(|d| d.is_dir());
+        if let Some(dir) = self.agent_log_watch_dir() {
+            if !targets.contains(&dir) {
+                targets.push(dir);
+            }
+        }
         targets
     }
 
@@ -513,6 +523,13 @@ impl App {
                 return;
             }
         };
+        let log = match event {
+            FsEvent::Changed(paths) => self.touches_agent_log(paths),
+            _ => true,
+        };
+        if log {
+            self.reload_agent_changes();
+        }
         self.refresh_panes(left, right);
     }
 
@@ -593,7 +610,8 @@ impl App {
         let mtimes = [&self.left, &self.right]
             .into_iter()
             .flat_map(|p| p.items.iter())
-            .filter_map(|e| e.metadata().and_then(|m| m.modified()).ok());
+            .filter_map(|e| e.metadata().and_then(|m| m.modified()).ok())
+            .chain(self.change_mtimes());
         watch::next_expiry(mtimes, now, self.session_start)
     }
 

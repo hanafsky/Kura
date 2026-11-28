@@ -123,6 +123,7 @@ sudo apt install ffmpeg
 - `/`: Enter search mode. Type a query to jump to matching entries (case-insensitive substring). The whole list is searched from the cursor, wrapping around at the end; press Enter or Esc to exit search.
 - `n` / `N`: Jump to the next / previous match of the last search (wrapping around).
 - `R`: Reload both panes from disk (cursor and marks stay on the same files). Useful with `KURA_WATCH=off` or when a change was missed.
+- `A`: List the files the coding agent (Claude Code) changed in the current pane, newest first (see [Files changed by the agent](#files-changed-by-the-agent)). In the list, `j` / `k` (with numeric prefixes), `gg` / `G` move, `Enter` goes to the file in its directory (closing the list), `e` opens it in your editor, `Y` copies it as an `@path` like `Y` in the file list, `R` re-reads the log, and `A` or `Esc` returns to the file list.
 - `r`: Rename the selected file; an inline prompt appears at the bottom.
 - `s`: Open a sort popup to choose ordering (modified/created/size/alphabetical). The chosen order is kept per pane, also when moving to another directory. The last row, `Directories first: on/off`, toggles listing directories before files (on by default).
 - `x`: Move the selected entry or all marked entries to the OS trash, after confirmation (`y` confirms; `n` / `Esc` / `Enter` / `q` cancel). If the trash is not available (e.g. on WSL or some Linux setups), an error is shown in the status line and nothing is deleted.
@@ -199,3 +200,31 @@ The directories shown in the two panes are watched, and the listing updates by i
 - unset: OS file events
 - `poll`: re-scan every second, for filesystems without events (e.g. WSL2 `/mnt/c`, network drives)
 - `off`: no watching (press `R` to reload)
+
+### Files changed by the agent
+
+`A` lists the files a Claude Code session edited. kura cannot see this by itself: a `PostToolUse` hook appends the absolute path of each file the agent edits (`Edit`, `Write`, `NotebookEdit`) to a log, one path per line, and kura reads that log. Add the hook to `~/.claude/settings.json` (all projects) or to a project's `.claude/settings.json`. It needs [`jq`](https://jqlang.org/) (`brew install jq`, `apt install jq`; on Windows `winget install jqlang.jq`) and a POSIX shell:
+
+```json
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "f=\"${KURA_AGENT_LOG:-${XDG_STATE_HOME:-$HOME/.local/state}/kura/agent-changes.log}\"; mkdir -p \"$(dirname \"$f\")\" && jq -r '.tool_input.file_path // .tool_input.notebook_path // empty' >> \"$f\""
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+- The log is `$XDG_STATE_HOME/kura/agent-changes.log`, by default `~/.local/state/kura/agent-changes.log`. It is one file for all projects, kept outside the project so that it does not show up as an untracked file. Set `KURA_AGENT_LOG` to use another file; the hook and kura must see the same value.
+- kura lists only the files under the directory it was started in, newest first and each once. Only the last 1 MiB of the log is read; delete the file to start over.
+- While the list is open, the log is watched (unless `KURA_WATCH=off`; press `R` then), so new edits show up by themselves. Files changed in the last 10 seconds and since kura started are highlighted like in the file list.
+- Files that no longer exist stay in the list, dimmed and marked `(deleted)`; `Enter` on one goes to the directory it was in.
+- Only edits made with the file tools are logged. Files changed by shell commands the agent runs (`mv`, `rm`, `sed -i`, formatters, …) are not.

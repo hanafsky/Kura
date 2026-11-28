@@ -299,14 +299,26 @@ pub fn copy_at_paths(app: &mut App) {
     if paths.is_empty() {
         return;
     }
+    if copy_paths_as_at(app, &paths) {
+        app.current_pane_mut().marked.clear();
+    }
+}
+
+/// Copy `paths` as `@path` references and report the result in the status
+/// line (shared by the file list and the agent changes list). Returns
+/// whether the copy succeeded.
+pub fn copy_paths_as_at(app: &mut App, paths: &[PathBuf]) -> bool {
     let style = PathStyle::from_env_value(std::env::var(PATH_STYLE_ENV).ok().as_deref());
-    let text = format_at_paths(&paths, &app.launch_dir, style);
+    let text = format_at_paths(paths, &app.launch_dir, style);
     match deliver(&text, &choose_plan(&ClipEnv::current())) {
         Ok(_) => {
-            app.current_pane_mut().marked.clear();
             app.notify_info(format!("Copied {} path(s)", paths.len()));
+            true
         }
-        Err(e) => app.notify_error(format!("Copy failed: {e}")),
+        Err(e) => {
+            app.notify_error(format!("Copy failed: {e}"));
+            false
+        }
     }
 }
 
