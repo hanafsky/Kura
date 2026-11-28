@@ -115,6 +115,7 @@ const SEND_TARGET_KEYS: Bindings = &[
     (KeyCode::Up, Command::MoveUp(1)),
     (KeyCode::Enter, Command::SendConfirm),
     (KeyCode::Esc, Command::Back),
+    (KeyCode::Char('q'), Command::Back),
 ];
 
 fn lookup(table: Bindings, code: KeyCode) -> Option<Command> {
@@ -173,10 +174,11 @@ impl KeyState {
             && lookup(VIEWER_CTRL_KEYS, code).is_some();
         // Text-input modes must receive every character (including 'q', 'g', 'G').
         let text_input = matches!(mode, Mode::Search { .. } | Mode::Rename { .. });
-        // In dialogs 'q' never quits (the delete dialog treats it as cancel).
+        // In dialogs 'q' never quits (the delete and send target dialogs
+        // treat it as cancel).
         let in_dialog = matches!(
             mode,
-            Mode::ConfirmDelete { .. } | Mode::PasteConflict { .. }
+            Mode::ConfirmDelete { .. } | Mode::PasteConflict { .. } | Mode::SendTarget { .. }
         );
         // In the diff viewer 'q' closes the diff (see DIFF_KEYS).
         let q_closes = matches!(mode, Mode::Viewer { diff: true, .. });
@@ -710,6 +712,8 @@ mod tests {
         assert_eq!(run(&t, &[KeyCode::Up]), [Command::MoveUp(1)]);
         assert_eq!(run(&t, &[KeyCode::Enter]), [Command::SendConfirm]);
         assert_eq!(run(&t, &[KeyCode::Esc]), [Command::Back]);
+        // 'q' cancels instead of quitting kura.
+        assert_eq!(run(&t, &[ch('q')]), [Command::Back]);
         // Filer keys do nothing in the dialog.
         assert_eq!(run(&t, &[ch('Y'), ch('x')]), []);
     }

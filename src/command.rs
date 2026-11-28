@@ -1396,6 +1396,27 @@ mod tests {
         }
 
         #[test]
+        fn q_in_the_target_dialog_cancels_without_quitting() {
+            use crossterm::event::{KeyCode, KeyEvent};
+            let tmp = abcd();
+            let fake = FakeHerdr::with_agents(json!([
+                agent("w1:p2", tmp.path()),
+                agent("w1:p3", tmp.path()),
+            ]));
+            let mut app = app_in(tmp.path());
+            app.ade = Ade::Herdr(fake.env());
+            let _ = app.apply(Command::ToggleMark);
+            let _ = app.apply(Command::CopyAtPaths);
+            let cmd = crate::input::KeyState::default()
+                .translate(&app.mode, KeyEvent::from(KeyCode::Char('q')))
+                .unwrap();
+            assert!(app.apply(cmd).is_continue());
+            assert!(matches!(app.mode, Mode::Filer));
+            assert!(sent_texts(&fake).is_empty());
+            assert_eq!(marked(&app), [0]);
+        }
+
+        #[test]
         fn no_agent_falls_back_to_the_clipboard() {
             let tmp = abcd();
             let fake = FakeHerdr::with_agents(json!([agent("w1:p1", tmp.path())]));

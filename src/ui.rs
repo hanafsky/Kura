@@ -185,7 +185,7 @@ fn draw_send_target(f: &mut Frame, targets: &[crate::ade::Agent], selected: usiz
     popup.height = (targets.len() as u16).saturating_add(2).min(area.height);
     popup.y = area.y + (area.height - popup.height) / 2;
     let block = Block::default()
-        .title(" Send to (Enter: send, Esc: cancel) ")
+        .title(" Send to (Enter: send, Esc/q: cancel) ")
         .borders(Borders::ALL);
     let items: Vec<ListItem> = targets
         .iter()
