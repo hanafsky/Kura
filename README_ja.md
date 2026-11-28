@@ -199,3 +199,46 @@ end
 - 未設定：OS のファイルイベント
 - `poll`：1 秒ごとに読み直す。イベントが届かないファイルシステム（WSL2 の `/mnt/c`、ネットワークドライブなど）向け
 - `off`：監視しない（`R` で手動で読み直せます）
+
+## Herdr プラグイン
+
+kura を [Herdr](https://herdr.dev/)（コーディングエージェント向けの TUI ターミナルワークスペース）のペインとして、エージェントの隣に、フォーカス中のペインのディレクトリで開けます。
+
+先に `kura` 本体を入れてください（[インストール](#インストール)）。プラグインは kura をビルドせず、Herdr サーバの `PATH` にある `kura` を起動します（Cargo で入れた場合は `~/.cargo/bin` が `PATH` に入っていることを確認してください）。そのうえでプラグインを入れます（Herdr 0.9.5 以降）。
+
+```bash
+herdr plugin install hanafsky/Kura
+```
+
+アクションは 2 つあります。
+
+| アクション | kura の開き方 |
+| --- | --- |
+| `kura.open` | フォーカス中のペインの右に分割して開く |
+| `kura.open-popup` | レイアウトの上にポップアップ（端末の 90%）で開く |
+
+`~/.config/herdr/config.toml` でキーに割り当てます。たとえば `prefix+f` なら次のとおりです。
+
+```toml
+[[keys.command]]
+key = "prefix+f"
+type = "plugin_action"
+command = "kura.open"
+description = "open kura"
+
+[[keys.command]]
+key = "prefix+shift+f"
+type = "plugin_action"
+command = "kura.open-popup"
+description = "open kura (popup)"
+```
+
+シェルから `herdr plugin action invoke kura.open` でも開けます。kura を終了（`q`）するとペインも閉じます。
+
+ポップアップの注意点：
+
+- ポップアップは `Esc` や Herdr のプレフィックスを含むすべてのキーを受け取るため、開いている間はペインを移動できません。`Esc` では閉じないので、`q` で kura を終了してください。
+- ポップアップにはペイン ID がなく（`HERDR_PANE_ID` も渡りません）、レイアウトにも含まれません。エージェントの隣に置いておきたいときは分割を使ってください。
+- 他の Herdr のポップアップやモーダル（Settings、Copy mode）が開いている間は開きません。
+
+何も開かないときは `herdr plugin log list --plugin kura` を確認してください。手元のチェックアウトを試すときは、`install` の代わりに `herdr plugin link /path/to/Kura` を使います。
