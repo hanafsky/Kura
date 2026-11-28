@@ -293,20 +293,33 @@ fn copy_text(text: &str, plan: &Plan) -> Result<(), String> {
     }
 }
 
+/// `@path` style from `KURA_AT_PATH`.
+pub fn path_style() -> PathStyle {
+    PathStyle::from_env_value(std::env::var(PATH_STYLE_ENV).ok().as_deref())
+}
+
 /// Copy the marked entries (or the cursor entry) as `@path` references.
 pub fn copy_at_paths(app: &mut App) {
     let paths = target_paths(app);
-    if paths.is_empty() {
-        return;
+    if !paths.is_empty() {
+        copy_paths(app, &paths);
     }
-    let style = PathStyle::from_env_value(std::env::var(PATH_STYLE_ENV).ok().as_deref());
-    let text = format_at_paths(&paths, &app.launch_dir, style);
+}
+
+/// Copy `paths` as `@path` references and report it. Returns whether the
+/// copy succeeded (the marks are cleared then).
+pub fn copy_paths(app: &mut App, paths: &[PathBuf]) -> bool {
+    let text = format_at_paths(paths, &app.launch_dir, path_style());
     match deliver(&text, &choose_plan(&ClipEnv::current())) {
         Ok(_) => {
             app.current_pane_mut().marked.clear();
             app.notify_info(format!("Copied {} path(s)", paths.len()));
+            true
         }
-        Err(e) => app.notify_error(format!("Copy failed: {e}")),
+        Err(e) => {
+            app.notify_error(format!("Copy failed: {e}"));
+            false
+        }
     }
 }
 

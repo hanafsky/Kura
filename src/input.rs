@@ -107,6 +107,17 @@ const SORT_KEYS: Bindings = &[
     (KeyCode::Esc, Command::Back),
 ];
 
+/// Agent choice for `Y` (send `@path` in herdr).
+const SEND_TARGET_KEYS: Bindings = &[
+    (KeyCode::Char('j'), Command::MoveDown(1)),
+    (KeyCode::Down, Command::MoveDown(1)),
+    (KeyCode::Char('k'), Command::MoveUp(1)),
+    (KeyCode::Up, Command::MoveUp(1)),
+    (KeyCode::Enter, Command::SendConfirm),
+    (KeyCode::Esc, Command::Back),
+    (KeyCode::Char('q'), Command::Back),
+];
+
 fn lookup(table: Bindings, code: KeyCode) -> Option<Command> {
     table.iter().find(|(k, _)| *k == code).map(|&(_, cmd)| cmd)
 }
@@ -120,6 +131,7 @@ fn mode_command(mode: &Mode, code: KeyCode) -> Option<Command> {
         Mode::Viewer { .. } => lookup(VIEWER_KEYS, code),
         Mode::Preview => lookup(PREVIEW_KEYS, code),
         Mode::Sort { .. } => lookup(SORT_KEYS, code),
+        Mode::SendTarget { .. } => lookup(SEND_TARGET_KEYS, code),
         Mode::Search { .. } => Some(match code {
             KeyCode::Char(c) => Command::InsertChar(c),
             KeyCode::Backspace => Command::DeleteChar,
@@ -162,10 +174,11 @@ impl KeyState {
             && lookup(VIEWER_CTRL_KEYS, code).is_some();
         // Text-input modes must receive every character (including 'q', 'g', 'G').
         let text_input = matches!(mode, Mode::Search { .. } | Mode::Rename { .. });
-        // In dialogs 'q' never quits (the delete dialog treats it as cancel).
+        // In dialogs 'q' never quits (the delete and send target dialogs
+        // treat it as cancel).
         let in_dialog = matches!(
             mode,
-            Mode::ConfirmDelete { .. } | Mode::PasteConflict { .. }
+            Mode::ConfirmDelete { .. } | Mode::PasteConflict { .. } | Mode::SendTarget { .. }
         );
         // In the diff viewer 'q' closes the diff (see DIFF_KEYS).
         let q_closes = matches!(mode, Mode::Viewer { diff: true, .. });
@@ -684,6 +697,25 @@ mod tests {
         assert_eq!(run(&s, &[KeyCode::Down]), [Command::MoveDown(1)]);
         assert_eq!(run(&s, &[ch('k')]), [Command::MoveUp(1)]);
         assert_eq!(run(&s, &[KeyCode::Enter]), [Command::SortConfirm]);
+    }
+
+    #[test]
+    fn send_target_keys() {
+        let t = Mode::SendTarget {
+            targets: vec![],
+            selected: 0,
+            paths: vec![],
+        };
+        assert_eq!(run(&t, &[ch('j')]), [Command::MoveDown(1)]);
+        assert_eq!(run(&t, &[KeyCode::Down]), [Command::MoveDown(1)]);
+        assert_eq!(run(&t, &[ch('k')]), [Command::MoveUp(1)]);
+        assert_eq!(run(&t, &[KeyCode::Up]), [Command::MoveUp(1)]);
+        assert_eq!(run(&t, &[KeyCode::Enter]), [Command::SendConfirm]);
+        assert_eq!(run(&t, &[KeyCode::Esc]), [Command::Back]);
+        // 'q' cancels instead of quitting kura.
+        assert_eq!(run(&t, &[ch('q')]), [Command::Back]);
+        // Filer keys do nothing in the dialog.
+        assert_eq!(run(&t, &[ch('Y'), ch('x')]), []);
     }
 
     #[test]

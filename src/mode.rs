@@ -52,4 +52,12 @@ pub enum Mode {
     PasteConflict {
         pending: crate::paste::PendingPaste,
     },
+    /// Choose the agent pane to send `@path` references to (`Y` in herdr
+    /// with several agents).
+    SendTarget {
+        targets: Vec<crate::ade::Agent>,
+        selected: usize,
+        /// The entries to send.
+        paths: Vec<PathBuf>,
+    },
 }
