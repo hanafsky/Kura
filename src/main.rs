@@ -1,4 +1,5 @@
 mod actions;
+mod ade;
 mod app;
 mod cli;
 mod clipboard;
@@ -42,6 +43,7 @@ fn run(
     let detected = graphics::detect();
     let mut app = App::with_panes(detected.picker, left, right, launch_dir)?;
     app.graphics_info = detected.info;
+    app.ade = ade::Ade::from_env();
     run_app(&mut terminal, &mut app, detected.typeahead)?;
     Ok(app.current_pane().current_dir.clone())
 }
