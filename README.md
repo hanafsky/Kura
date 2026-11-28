@@ -200,3 +200,46 @@ The directories shown in the two panes are watched, and the listing updates by i
 - unset: OS file events
 - `poll`: re-scan every second, for filesystems without events (e.g. WSL2 `/mnt/c`, network drives)
 - `off`: no watching (press `R` to reload)
+
+## Herdr plugin
+
+kura can be opened as a pane of [Herdr](https://herdr.dev/) (the TUI terminal workspace manager for coding agents), next to your agents, in the directory of the focused pane.
+
+Install the `kura` binary first ([Installation](#installation)). The plugin does not build kura; it runs `kura` from the `PATH` of the Herdr server (if you installed with Cargo, make sure `~/.cargo/bin` is on it). Then install the plugin (Herdr 0.9.5 or later):
+
+```bash
+herdr plugin install hanafsky/Kura
+```
+
+It provides two actions:
+
+| Action | Opens kura |
+| --- | --- |
+| `kura.open` | in a split to the right of the focused pane |
+| `kura.open-popup` | in a popup (90% of the terminal) over the layout |
+
+Bind them in `~/.config/herdr/config.toml`, for example to `prefix+f`:
+
+```toml
+[[keys.command]]
+key = "prefix+f"
+type = "plugin_action"
+command = "kura.open"
+description = "open kura"
+
+[[keys.command]]
+key = "prefix+shift+f"
+type = "plugin_action"
+command = "kura.open-popup"
+description = "open kura (popup)"
+```
+
+You can also run them from the shell with `herdr plugin action invoke kura.open`. Quitting kura (`q`) closes its pane.
+
+Notes on the popup:
+
+- A popup receives every key, including `Esc` and the Herdr prefix, so you cannot switch panes while it is open. `Esc` does not close it; quit kura with `q`.
+- A popup has no pane ID (no `HERDR_PANE_ID`) and is not part of the layout. Use the split when you want kura to stay open beside your agents.
+- It does not open while another Herdr popup or modal (Settings, Copy mode) is open.
+
+If nothing opens, check `herdr plugin log list --plugin kura`. To try a local checkout, use `herdr plugin link /path/to/Kura` instead of `install`.
