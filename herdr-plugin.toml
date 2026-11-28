@@ -8,7 +8,7 @@
 
 id = "kura"
 name = "kura"
-version = "0.4.1"
+version = "0.5.0"
 min_herdr_version = "0.9.5"
 description = "Two-pane TUI file manager, opened beside your agents in the focused pane's directory."
 platforms = ["linux", "macos"]
