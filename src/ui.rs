@@ -378,7 +378,8 @@ fn draw_changes(f: &mut Frame, area: Rect, app: &App, items: &[PathBuf], selecte
                 .add_modifier(Modifier::BOLD),
         ))
         .title_bottom(
-            Line::from(" Enter: go to file  e: edit  Y: copy @path  A/Esc: close ").right_aligned(),
+            Line::from(" Enter: go to file  e: edit  Y: copy @path  A/q/Esc: close ")
+                .right_aligned(),
         );
     if items.is_empty() {
         let text = Span::styled(

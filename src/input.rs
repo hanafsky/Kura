@@ -61,6 +61,7 @@ const CHANGES_KEYS: Bindings = &[
     (KeyCode::Char('R'), Command::Refresh),
     (KeyCode::Char('A'), Command::ToggleAgentChanges),
     (KeyCode::Esc, Command::Back),
+    (KeyCode::Char('q'), Command::Back),
 ];
 
 /// Visual (range) selection.
@@ -181,8 +182,9 @@ impl KeyState {
             mode,
             Mode::ConfirmDelete { .. } | Mode::PasteConflict { .. }
         );
-        // In the diff viewer 'q' closes the diff (see DIFF_KEYS).
-        let q_closes = matches!(mode, Mode::Viewer { diff: true, .. });
+        // In the diff viewer and the agent changes list 'q' closes them
+        // (see DIFF_KEYS, CHANGES_KEYS).
+        let q_closes = matches!(mode, Mode::Viewer { diff: true, .. } | Mode::Changes { .. });
         if code == KeyCode::Char('q') && !text_input && !in_dialog && !q_closes {
             return Some(Command::Quit);
         }
@@ -811,7 +813,7 @@ mod tests {
         assert_eq!(run(&changes, &[ch('k')]), [Command::MoveUp(1)]);
         assert_eq!(run(&changes, &[ch('g'), ch('g')]), [Command::GoTop]);
         assert_eq!(run(&changes, &[ch('G')]), [Command::GoBottom]);
-        assert_eq!(run(&changes, &[ch('q')]), [Command::Quit]);
+        assert_eq!(run(&changes, &[ch('q')]), [Command::Back]);
         // File-list operations do not apply to the list.
         assert!(run(&changes, &[ch('x')]).is_empty());
         assert!(run(&changes, &[ch('p')]).is_empty());
